@@ -1,0 +1,8 @@
+FROM --platform=linux/amd64 platformio/platformio-core:latest
+WORKDIR /project
+COPY . /project
+RUN pio update
+RUN pio run
+
+# Use: docker build -t stm32-pio -f Dockerfile.pio .
+# then: docker run --rm -v $(pwd):/project stm32-pio pio run -t upload
