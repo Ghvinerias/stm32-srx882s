@@ -1,0 +1,22 @@
+# Build artifacts
+build/
+out/
+*.o
+*.d
+*.elf
+*.bin
+*.hex
+*.map
+*.lst
+
+# Tool caches and IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Python tooling
+.venv/
+__pycache__/
+*.pyc
