@@ -1,0 +1,45 @@
+topic: "Authorized T5502 HCS301 KeeLoq duplication and interoperability without physical receiver access"
+
+scope:
+  authorization_assumption: "The requester owns or is explicitly authorized to administer the remote-controlled system."
+  included: "Identification, receive-only characterization, compatibility analysis, legitimate enrollment, OEM/installer services, receiver replacement, and high-level feasibility assessment."
+  excluded: "Actionable key or seed extraction, cryptographic attacks, rolling-code defeat, replay, brute force, receiver bypass, or instructions enabling unauthorized access."
+
+items:
+  - name: "T5502 identity and hardware variants"
+    category: "Device identification"
+    description: "Establish authoritative T5502 specifications, regional frequency and battery variants, PCB and IC markings, revision conflicts, and the evidence needed to identify the requester's unit non-destructively."
+
+  - name: "HCS301 KeeLoq architecture and security boundaries"
+    category: "Protocol architecture"
+    description: "Explain public HCS301 code-word structure, synchronization concepts, serial and discrimination data, key and seed roles, manufacturer-code domains, and why observable transmissions are insufficient for an independent credential, without attack procedures."
+
+  - name: "Receive-only RF characterization and compatibility testing"
+    category: "Measurement"
+    description: "Research lawful non-invasive frequency, modulation, timing, frame, channel, and repeat-capture measurements that can establish RF compatibility while avoiding secret recovery, replay, or transmission."
+
+  - name: "Receiver family identification without enclosure access"
+    category: "System identification"
+    description: "Determine how invoices, installer records, operator labels, documentation, authorized support, and observed behavior can identify the receiver family, firmware, key domain, memory policy, and compatibility when its enclosure cannot be accessed."
+
+  - name: "Authorized enrollment and replacement routes"
+    category: "Provisioning"
+    description: "Compare OEM replacement, installer or locksmith service, conventional receiver learn mode, authorized transmitter-assisted self-learning, factory provisioning, and compatible-new-credential routes, explicitly separating enrollment from cloning."
+
+  - name: "No-receiver-access feasibility and claim validation"
+    category: "Feasibility"
+    description: "Assess exact duplication feasibility under three cases—no physical enclosure access, no administrative access, and no receiver participation at all—and evaluate vendor 'clone/copy/autocopy' claims without providing key extraction or cryptographic bypass methods."
+
+  - name: "Receiver or add-on receiver migration routes"
+    category: "System migration"
+    description: "Research authorized receiver replacement or add-on receiver options when the original provisioning domain is unavailable, including credential semantics, wiring and professional installation prerequisites at a high level, existing-remote impact, and rollback."
+
+  - name: "Safety legality lifecycle and acceptance testing"
+    category: "Governance and operations"
+    description: "Cover authorization and jurisdiction-sensitive constraints, product authenticity and lifecycle, evidence preservation, counter and enrollment side effects, memory and revocation governance, rollback, and supervised acceptance tests."
+
+execution:
+  batch_size: 3
+  items_per_agent: 2
+  output_dir: "/home/slick/code/stm32-srx882s/keeloq_t5502_authorized_duplication/results"
+

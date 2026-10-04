@@ -19,6 +19,3 @@ typedef struct {
 
 // Classify pulses (high/low alternating durations in us)
 classification_t classify_pulses(const uint32_t *pulses, size_t npulses);
-#pragma once
-
-// TODO: Protocol classifier API

@@ -15,7 +15,7 @@ classification_t classify_pulses(const uint32_t *pulses, size_t npulses) {
     // Use pulses_to_bits to get a mode and symbol estimate
     uint8_t bits[128] = {0};
     pulse_mode_t mode = PULSE_MODE_UNKNOWN;
-    size_t nbits = pulses_to_bits(pulses, npulses, bits, 0, &mode);
+    size_t nbits = pulses_to_bits(pulses, npulses, bits, sizeof(bits), 0, &mode);
     res.nbits = nbits;
     // estimate symbol time by averaging pairs
     size_t pairs = npulses/2;
@@ -53,6 +53,3 @@ classification_t classify_pulses(const uint32_t *pulses, size_t npulses) {
     res.proto = PROTO_UNKNOWN;
     return res;
 }
-#include "protocol_classifier.h"
-
-// TODO: Implement protocol classification logic

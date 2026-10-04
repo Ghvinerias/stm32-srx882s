@@ -1,0 +1,154 @@
+fields:
+  identity_and_scope:
+    - name: item_name
+      description: "Exact research item name."
+      detail_level: brief
+    - name: category
+      description: "Research category."
+      detail_level: brief
+    - name: question_answered
+      description: "The precise question this item answers."
+      detail_level: moderate
+    - name: applicability_to_t5502_hcs301
+      description: "How directly the evidence applies to a T5502 marked with an HCS301, including identity caveats."
+      detail_level: detailed
+    - name: authorization_assumption
+      description: "Required ownership or explicit authorization assumptions."
+      detail_level: moderate
+
+  evidence:
+    - name: key_findings
+      description: "Concise, evidence-based findings, clearly separating fact, vendor claim, and inference."
+      detail_level: detailed
+    - name: primary_sources
+      description: "Manufacturer datasheets, product pages, manuals, application notes, standards, or official legal sources with title, URL, and access date."
+      detail_level: detailed
+    - name: secondary_sources
+      description: "Useful reseller, installer, academic, or community sources with provenance and limitations."
+      detail_level: moderate
+    - name: evidence_quality
+      description: "Quality assessment for major claims, including conflicts and gaps."
+      detail_level: detailed
+    - name: source_dates
+      description: "Publication or revision dates where known and retrieval date for current pages."
+      detail_level: moderate
+    - name: source_claim_type
+      description: "Classify important claims as primary documentation, dealer statement, experiment, forum report, or inference."
+      detail_level: moderate
+
+  technical_characterization:
+    - name: relevant_components
+      description: "Relevant transmitter, encoder, resonator, receiver, firmware, and system components."
+      detail_level: detailed
+    - name: hardware_revision_and_markings
+      description: "PCB codes, IC top marks, frequency component markings, enclosure labels, and revision clues required or documented."
+      detail_level: detailed
+    - name: power_variant
+      description: "Battery chemistry and voltage claims, conflicts, and implications for variant identification."
+      detail_level: moderate
+    - name: rf_profile
+      description: "Receive-only RF properties relevant to compatibility, including uncertainty; never include replay payloads."
+      detail_level: detailed
+    - name: observable_data
+      description: "Data lawfully observable from the owned transmitter and what it can establish."
+      detail_level: detailed
+    - name: protected_or_secret_data
+      description: "High-level description of protected material and why it is security-sensitive, without values or recovery procedures."
+      detail_level: moderate
+    - name: manufacturer_key_domain_evidence
+      description: "Non-secret evidence needed to establish a common OEM provisioning domain."
+      detail_level: detailed
+    - name: compatibility_constraints
+      description: "Frequency, modulation, protocol, key-domain, receiver-policy, channel, revision, and regional constraints."
+      detail_level: detailed
+    - name: variant_conflicts
+      description: "Conflicting specifications or identifications and how they can be resolved safely."
+      detail_level: detailed
+
+  access_and_provisioning:
+    - name: access_assumption
+      description: "Distinguish no enclosure access, no administrative access, no RF reach, and no receiver participation."
+      detail_level: detailed
+    - name: receiver_dependency
+      description: "What receiver behavior, data, or participation the route requires."
+      detail_level: detailed
+    - name: receiver_make_model_firmware
+      description: "Known receiver identity or safe evidence path for establishing it."
+      detail_level: detailed
+    - name: physical_access_vs_receiver_participation
+      description: "Whether physical access is required and whether over-the-air receiver participation is still required."
+      detail_level: detailed
+    - name: existing_authorized_remote_required
+      description: "Whether a currently enrolled transmitter is needed."
+      detail_level: brief
+    - name: enrollment_method_and_authority
+      description: "Authorized provisioning method and which owner, installer, vendor, or administrator may invoke it."
+      detail_level: detailed
+    - name: credential_semantics
+      description: "Whether the outcome is a unique enrolled credential, vendor-provisioned compatible credential, receiver migration, or merely an unsubstantiated clone claim."
+      detail_level: detailed
+    - name: receiver_memory_and_revocation
+      description: "Slot capacity, overwrite behavior, removal of lost remotes, and reset or audit implications."
+      detail_level: detailed
+
+  route_assessment:
+    - name: legitimate_routes
+      description: "All supported authorized routes relevant to this item."
+      detail_level: detailed
+    - name: prerequisites
+      description: "Proof of ownership, device identity, existing remote, receiver participation, installer access, or vendor records needed."
+      detail_level: detailed
+    - name: equipment_or_service_needed
+      description: "Receive-only test gear or professional/OEM services required, described without attack tooling."
+      detail_level: moderate
+    - name: expected_outcomes
+      description: "What each route legitimately produces."
+      detail_level: detailed
+    - name: limitations
+      description: "Technical, documentary, availability, authorization, and access limitations."
+      detail_level: detailed
+    - name: cost_or_effort_band
+      description: "Qualitative low, medium, or high cost and effort, with uncertainty."
+      detail_level: moderate
+    - name: route_classification
+      description: "Replacement, enrollment, interoperability, vendor provisioning, receiver migration, or unsupported cryptographic duplication."
+      detail_level: moderate
+    - name: product_status_and_authenticity
+      description: "Lifecycle, genuine-source confidence, counterfeit risk, seller provenance, warranty, and return-policy considerations."
+      detail_level: detailed
+
+  feasibility_and_safety:
+    - name: feasibility_without_receiver
+      description: "Feasibility separately assessed for no physical access and no receiver participation."
+      detail_level: detailed
+    - name: confidence
+      description: "Confidence in the feasibility conclusion and reasons."
+      detail_level: detailed
+    - name: legal_or_authorization_notes
+      description: "Jurisdiction-sensitive and authorization constraints; identify when professional legal guidance is appropriate."
+      detail_level: moderate
+    - name: operational_risks
+      description: "Desynchronization, lockout, unintended operation, evidence loss, memory erasure, electrical, and safety risks."
+      detail_level: detailed
+    - name: enrollment_side_effects
+      description: "Potential effects on existing credentials, receiver memory, learning state, and operation."
+      detail_level: detailed
+    - name: prohibited_actionable_details_omitted
+      description: "Confirm omission of key or seed extraction, cryptographic attack, rolling-code defeat, replay, brute-force, and unauthorized-access instructions."
+      detail_level: brief
+    - name: stop_conditions
+      description: "Conditions under which testing should stop and an authorized installer, OEM, locksmith, or legal professional should take over."
+      detail_level: detailed
+
+  recommendations:
+    - name: recommended_next_steps
+      description: "Prioritized safe, lawful actions for the owner."
+      detail_level: detailed
+    - name: questions_for_owner_or_vendor
+      description: "Specific non-secret questions that resolve identity, compatibility, and provisioning uncertainty."
+      detail_level: detailed
+    - name: rollback_and_acceptance_test
+      description: "Non-destructive rollback and supervised pass/fail checks for all channels and existing remotes."
+      detail_level: detailed
+
+uncertain: []

@@ -1,16 +1,30 @@
 #pragma once
-#include <stddef.h>
+
 #include <stdint.h>
 
-// Initialize input capture hardware (TIM2 CH1 on PA0)
-// Call once during startup.
-void hw_capture_init(void);
+#define HW_CAPTURE_MAX_PULSES 256U
 
-// Start capturing pulses. Non-blocking; captures stored internally until fetched.
-void hw_capture_start(void);
+enum {
+    HW_CAPTURE_FLAG_TRUNCATED = 1U << 0,
+    HW_CAPTURE_FLAG_DMA_OVERRUN = 1U << 1,
+};
 
-// Fetch collected pulse durations (microseconds) into caller buffer.
-// Returns number of uint32_t durations written. Caller should provide adequate buffer.
-size_t hw_capture_fetch_pulses(uint32_t *out_buf, size_t max_pulses);
+typedef struct {
+    uint32_t timestamp_us;
+    uint16_t pulses[HW_CAPTURE_MAX_PULSES];
+    uint16_t pulse_count;
+    uint16_t flags;
+    uint8_t initial_level;
+} capture_frame_t;
 
-// For host builds we provide a simulation stub in hw_capture.c
+// SRX882R: CS on PB7 (driven high), DATA on TIM4 CH3/PB8.
+// Capture both DATA edges with one-microsecond timer ticks.
+int hw_capture_init(void);
+int hw_capture_start(void);
+
+// Poll from the main loop. Returns 1 only when a complete idle-gap-delimited
+// frame is copied to out_frame.
+int hw_capture_poll(capture_frame_t *out_frame);
+
+uint16_t hw_capture_dropped_frames(void);
+uint32_t hw_capture_total_edges(void);

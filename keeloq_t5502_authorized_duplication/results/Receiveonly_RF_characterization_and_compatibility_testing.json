@@ -1,0 +1,132 @@
+{
+  "item_name": "Receive-only RF characterization and compatibility testing",
+  "category": "Measurement",
+  "question_answered": "Which passive, non-invasive measurements can establish RF-layer and public-format compatibility for an owned Hiland T5502/HCS301 transmitter, and what conclusions remain impossible without receiver or provisioning evidence?",
+  "applicability_to_t5502_hcs301": "Direct for a genuine Hiland T5502 whose identity is corroborated by its case/PCB and whose encoder top mark is HCS301. Hiland's current product material identifies T5502 as a three-channel 433.92 MHz rolling-code transmitter using a 12 V 23A battery. An HCS301 top mark supports use of Microchip's public timing and packet-format documentation, but it does not by itself identify the OEM cryptographic provisioning domain, receiver family, board revision, or regional variant.",
+  "authorization_assumption": "The transmitter and controlled installation are owned by the requester or are being tested with the owner's explicit permission. Captures remain local, are treated as security-sensitive records, and are not transmitted, replayed, or used to operate a third party's system.",
+  "key_findings": [
+    "Manufacturer fact: Hiland describes the T5502 as a three-channel, 433.92 MHz rolling-code transmitter with a 12 V 23A battery and approximately 50 m stated working distance.",
+    "Primary silicon fact: Microchip documents HCS301 normal transmission as repeated PWM code words, with a fixed portion and a changing encrypted portion; public waveform structure supports passive carrier, modulation, symbol-timing, burst-duration, repetition, and button-correlation measurements.",
+    "Measurement conclusion: a spectrum analyzer or receive-only SDR can verify carrier location, occupied bandwidth, ASK/OOK-like amplitude modulation behavior, relative signal strength, timing, frame length, repeat cadence, and whether multiple presses differ. Those observations can reject obvious incompatibilities but cannot prove receiver acceptance.",
+    "Security conclusion: repeated captures are expected to differ in the hopping portion. Capture comparison does not reveal or validate the secret crypt key/manufacturer code and must not be converted into replay or key-recovery activity.",
+    "Compatibility conclusion: matching 433.92 MHz, gross modulation, timing, and public frame shape is necessary but insufficient. The receiver must also implement the corresponding protocol/learning method, share the OEM provisioning domain, accept the transmitter identity/counter state, map the intended channel, and have an available credential slot.",
+    "Inference: a passive capture can show whether each physical button produces a distinct public function pattern and similar RF envelope, but labeling those functions as gate actions requires installation records or a supervised operational check."
+  ],
+  "primary_sources": [
+    {
+      "title": "Hiland T5XXX Transmitter product page",
+      "url": "https://www.hiland.cc/Transmitter/T5XXX",
+      "accessed": "2026-10-01",
+      "supports": "T5502 product identity, 433.92 MHz, rolling code, three channels, 12 V 23A battery, nominal range, and receiver-dependent self-learning claim."
+    },
+    {
+      "title": "Hiland 2023-2024 product catalogue",
+      "url": "https://am.hiland.cc/catalog/view/556/%E7%9B%AE%E5%BD%95%E5%86%8C2023-2024-1.pdf",
+      "accessed": "2026-10-01",
+      "supports": "T5502 model listing and stated frequency, channel count, rolling-code type, battery and dimensions."
+    },
+    {
+      "title": "Microchip HCS301 KeeLoq Code Hopping Encoder Data Sheet, DS21143C",
+      "url": "https://ww1.microchip.com/downloads/en/devicedoc/21143c.pdf",
+      "accessed": "2026-10-01",
+      "supports": "Public code-word organization, PWM timing, repetition behavior, synchronization, learn concepts, secret-key boundaries and operating characteristics."
+    },
+    {
+      "title": "Microchip KeeLoq Technology FAQs",
+      "url": "https://www.microchip.com/en-us/products/wireless-connectivity/features/security/ultimate-keeloq-technology/keeloq-technology-faqs",
+      "accessed": "2026-10-01",
+      "supports": "Code hopping purpose, learning variants, receiver-stored state, manufacturer-code concept, and why reuse of a captured code is not a legitimate credential."
+    },
+    {
+      "title": "ETSI EN 300 220-1 V3.1.1, Short Range Devices: technical characteristics and methods of measurement",
+      "url": "https://www.etsi.org/deliver/etsi_en/300200_300299/30022001/03.01.01_30/en_30022001v030101v.pdf",
+      "accessed": "2026-10-01",
+      "supports": "Authoritative measurement framework for sub-GHz short-range-device RF characteristics; it is a compliance standard, not a product pairing guide."
+    }
+  ],
+  "secondary_sources": [
+    {
+      "title": "Reids Remotes: Hiland T5502 product listing",
+      "url": "https://www.reidsremotes.com.au/home/2748-hiland-t5502-3-button-black-rolling-code-remote-control.html",
+      "accessed": "2026-10-01",
+      "limitation": "Dealer statement rather than manufacturer documentation; useful corroboration for 433.92 MHz, learn-to-receiver method, battery, and claimed cross-model replacement list, but compatibility claims require OEM confirmation."
+    }
+  ],
+  "evidence_quality": "High for HCS301 waveform/architecture because Microchip is the silicon manufacturer; high-to-moderate for current T5502 headline specifications because Hiland publishes them, although its family table is ambiguously formatted and revisions may exist. Moderate for the dealer's broad replacement list. No source found establishes that every T5502 board uses HCS301, that all units share one manufacturer-code domain, or that a particular unseen receiver accepts this transmitter.",
+  "source_dates": [
+    "Microchip DS21143C: 2011 revision shown by the published PDF metadata/search record; accessed 2026-10-01.",
+    "Hiland catalogue: labeled 2023-2024; accessed 2026-10-01.",
+    "Hiland live product page: publication date not stated [uncertain]; accessed 2026-10-01.",
+    "ETSI EN 300 220-1 V3.1.1: 2016-11; accessed 2026-10-01.",
+    "Reids Remotes listing: publication date not stated [uncertain]; accessed 2026-10-01."
+  ],
+  "source_claim_type": [
+    "Hiland specifications and product catalogue: manufacturer documentation.",
+    "Microchip datasheet and FAQ: primary component documentation/vendor explanation.",
+    "ETSI standard: standards-body measurement documentation.",
+    "Reids Remotes compatibility list: dealer statement.",
+    "Any conclusion that RF similarity implies only candidate compatibility, not enrollment compatibility: engineering inference grounded in the cited architecture."
+  ],
+  "relevant_components": "Owned Hiland T5502 enclosure and PCB; HCS301 encoder if the top mark is genuine; button matrix; 12 V 23A battery; oscillator/resonator and RF output stage; antenna trace; a receive-only SDR or spectrum analyzer with suitable 433 MHz antenna/attenuation; analysis software used only for RF envelope/timing comparison; and the unknown receiver/decoder, firmware, stored manufacturer-domain material, enrolled serial/counter state, and output-channel mapping.",
+  "hardware_revision_and_markings": "Record without altering the board: case brand/model, rear label and regulatory IDs; PCB legend (including T5502 and revision/date codes); encoder full top mark/package; RF resonator/crystal/SAW markings; transistor and major component marks; battery marking/polarity; antenna geometry; button count/color; and high-resolution photographs of both sides if authorized. Treat a case match alone as insufficient because Hiland notes multiple T5XXX variants and sellers report rebranding. Opening the owned remote is not necessary for RF measurements and should be skipped if warranty, damage, or authorization is in doubt.",
+  "power_variant": "Hiland's T5502-specific catalogue/product material states a 12 V 23A alkaline battery. Broader T5XXX family tables include other battery arrangements, and third-party HCS301 remotes are not evidence for T5502. Confirm the fitted battery and holder marking before associating a board with this variant; low battery can distort amplitude/range and possibly timing measurements.",
+  "rf_profile": "Expected carrier is 433.92 MHz for the documented T5502. Safely measure center frequency, drift over a button hold, occupied bandwidth at a consistent analyzer setting, amplitude-envelope modulation, pulse-duration clusters, total code-word duration, inter-word gap, burst length, and repetition count. The HCS301 data sheet documents pulse-width-modulated repeated code words; report only aggregate timing/structure and redacted comparisons, never reusable bit strings or raw payloads. Use a shielded or low-coupling bench arrangement and a receive-only signal path; do not connect any transmit-capable path or radiate test frames.",
+  "observable_data": "Non-secret observations include carrier and drift, bandwidth, relative amplitude, noise floor, burst and gap timing, number of repeats during a held press, number of apparent symbols, whether the envelope resembles documented PWM, which button was physically pressed, and whether successive authorized presses produce changing regions while stable structural features remain. Public HCS301 documentation says the normal code word includes button status and a serial-number portion outside the encrypted hopping portion, but any decoded identifiers and complete captures should be treated as sensitive, minimized, redacted in reports, and not shared. Measurements can establish candidate RF/protocol family and distinguish buttons; they cannot authenticate a new transmitter.",
+  "protected_or_secret_data": "The HCS301 crypt key, OEM manufacturer code/key-derivation domain, secure-learn seed (if that enrollment mode is used), receiver credential database, and synchronization state are security-sensitive. This item provides no values, extraction path, brute force, cryptanalysis, replay, emulation, or transmitter-generation instructions.",
+  "manufacturer_key_domain_evidence": "Acceptable non-secret evidence is an explicit Hiland/OEM compatibility statement for the exact transmitter and receiver model/revision; a matching authorized part number from the installer or distributor; an OEM-issued replacement; or successful authorized enrollment under the receiver's documented procedure. Frequency, HCS301 marking, similar waveforms, identical case, visible serial format, or a seller's generic 'HCS301 compatible' statement do not establish a shared key domain.",
+  "compatibility_constraints": "All of the following must align: regional legal frequency; actual carrier tolerance and receiver bandwidth; modulation/envelope and symbol timing; HCS301/public packet-family implementation; transmitter button/function mapping; OEM manufacturer-code/key-derivation domain; learning mode supported by the receiver; transmitter serial/identity policy; rolling-counter synchronization window; receiver firmware and revision; memory capacity and slot availability; and product-region/revision compatibility. RF-layer matching alone resolves only the first few constraints.",
+  "variant_conflicts": "Hiland sources support 433.92 MHz and 12 V 23A for T5502, while the broader T5XXX family material also mentions 318 MHz and several battery arrangements without an unambiguous column-to-model rendering. Resolve by comparing the exact T5502 product page/catalogue, physical PCB/resonator and battery markings, passive carrier measurement, country/installer records, and OEM support. Do not infer a regional variant solely from the enclosure. Dealer claims that T5502 replaces many Hiland remotes are useful leads but should be verified against receiver model/revision and return policy.",
+  "access_assumption": "This route assumes possession of the owned transmitter and permission to make passive RF observations. It requires neither receiver-enclosure access nor administrative access, and can be performed outside RF reach of the receiver to avoid actuation. It does not provide receiver participation, enrollment, or proof of acceptance.",
+  "receiver_dependency": "None for passive characterization. A receiver, its documentation, OEM records, or a supervised enrollment/acceptance test is still required to move from candidate RF compatibility to proven system compatibility.",
+  "receiver_make_model_firmware": "Unknown [uncertain]. Passive transmitter captures cannot determine the exact receiver model or firmware. Establish those through installation paperwork, externally visible operator/control-panel labels, installer/OEM records, or authorized service rather than waveform inference.",
+  "physical_access_vs_receiver_participation": "Physical enclosure access is not required for measurement. Receiver participation is also unnecessary for measurement, but is ultimately required for legitimate enrollment or an operational acceptance test unless an OEM supplies a factory-provisioned credential guaranteed for the documented receiver/domain.",
+  "existing_authorized_remote_required": "Yes for direct comparison; the owned T5502 is the reference. It is not sufficient by itself to create or prove a new credential.",
+  "enrollment_method_and_authority": "No enrollment is performed in this measurement route. Any later learning/self-learning operation must follow the exact receiver/OEM manual and be invoked by the owner, authorized administrator, installer, or OEM support; do not infer a sequence from a generic receiver.",
+  "credential_semantics": "The outcome is an RF/protocol compatibility profile and evidence package, not a clone or credential. A later OEM replacement would normally be a unique enrolled or vendor-provisioned compatible credential, not a bit-for-bit duplicate.",
+  "receiver_memory_and_revocation": "Not observable by passive RF measurement [uncertain]. Slot capacity, full-memory behavior, erase scope, per-remote revocation, and audit/reset effects are receiver-specific and must be obtained from its exact manual or authorized support before enrollment.",
+  "legitimate_routes": [
+    "Document the remote and use a receive-only analyzer to confirm carrier, modulation envelope, timing, repeat cadence and per-button distinctions.",
+    "Compare only aggregate/redacted measurements against Microchip and Hiland documentation or an OEM-supplied known-good unit.",
+    "Send model/PCB photos and measurement summary—not raw reusable captures—to Hiland, the installer, or an established gate/garage remote specialist for exact part-number matching.",
+    "Purchase a genuine returnable replacement specified for the identified receiver and complete authorized enrollment plus supervised acceptance testing."
+  ],
+  "prerequisites": "Proof of ownership/authorization; the original remote; a safe bench location outside unintended operating range or with the controlled machinery placed safely out of service by a competent person; known-good battery; written capture-handling rules; exact labels/markings; and, for final compatibility, receiver or installer identity records.",
+  "equipment_or_service_needed": "A receive-only SDR or spectrum analyzer covering 433.92 MHz, suitable antenna or near-field pickup, optional attenuation/shielding, and software capable of spectrum and amplitude-versus-time display. A qualified RF lab or gate-access installer can perform this if measurement competence or machinery safety is uncertain. No replay, transmit, credential-extraction, or brute-force tooling is needed or appropriate.",
+  "expected_outcomes": "Carrier confirmation; an RF envelope/timing profile; evidence that the three buttons emit distinct transmissions; detection of changing rolling portions across presses; rejection of wrong-frequency or grossly wrong-modulation candidates; and a concise compatibility dossier for OEM/installer review. It will not yield a secret, seed, independent clone, or guaranteed receiver acceptance.",
+  "limitations": "A passive trace cannot identify an unseen receiver, firmware, manufacturer key domain, enrollment mode, memory policy, or synchronization acceptance window. Low-cost receivers/analyzers may have frequency error, AGC distortion or inadequate sample rate. Near-field coupling and battery condition alter amplitudes. Raw capture retention creates security and privacy risk. The exact T5502 hardware revision and the user's regional variant remain unverified without physical evidence.",
+  "cost_or_effort_band": "Low-to-medium if suitable receive-only equipment and RF experience are already available; medium if a professional lab/installer is used. This route reduces purchasing uncertainty but does not replace OEM compatibility confirmation or enrollment.",
+  "route_classification": "Receive-only measurement and interoperability screening; not cloning and not provisioning.",
+  "product_status_and_authenticity": "Hiland currently exposes T5502 product information and a 2023-2024 catalogue, but lifecycle/authorized-channel status for the requester's exact unit is not stated [uncertain]. Prefer Hiland or traceable authorized distributors, verify model/revision photos, obtain a written compatibility statement, and require a return policy. Generic '433 MHz HCS301 copy/clone' listings do not prove authentic Hiland provisioning or receiver compatibility.",
+  "feasibility_without_receiver": "With no physical receiver access, passive RF characterization is fully feasible and useful for screening. With no receiver participation at all, it can only narrow candidates; it cannot create, enroll, or validate a replacement credential. Exact cryptographic duplication is outside this route and is neither established nor justified by matching captures.",
+  "confidence": "High that receive-only measurement can establish carrier/modulation/timing compatibility and high that it cannot establish key-domain or enrollment compatibility, based on Hiland specifications and Microchip's architecture. Moderate confidence in exact unit applicability until its markings and measured carrier corroborate the published T5502 variant.",
+  "legal_or_authorization_notes": "Passive reception of one's own transmitter is generally lower risk than transmitting, but interception, retention, disclosure, spectrum use, privacy, access-control, and anti-circumvention laws vary. Keep the work within ownership/explicit authorization, do not capture third-party devices, do not transmit or replay, and seek local legal or licensed-professional advice where authorization or jurisdiction is unclear.",
+  "operational_risks": "Pressing the original remote within range may move a gate/door and injure people or damage property. Repeated off-range presses advance the transmitter counter and excessive presses may exceed the receiver's resynchronization policy, causing temporary rejection or service need. Other risks include accidental RF transmission from test gear, exposing raw credentials/captures, misclassification due to analyzer error or low battery, and loss of evidence through uncontrolled files. Use a receive-only hardware configuration, minimal press count, a cleared/supervised site, and encrypted/minimized records.",
+  "enrollment_side_effects": "None from truly passive measurement, apart from advancing the transmitter's rolling counter each time a button is pressed. Do not enter receiver learning mode during characterization. Any later learning may consume/overwrite slots, alter channel mappings, or erase existing remotes depending on the receiver and must be separately reviewed.",
+  "prohibited_actionable_details_omitted": "Yes. Key/seed extraction, cryptographic attack, rolling-code defeat, replay, brute force, payload generation and unauthorized-access instructions are omitted.",
+  "stop_conditions": "Stop if a press could move machinery without a clear safe zone and spotter; the analyzer can transmit or its RF path is uncertain; the remote belongs to someone else; repeated presses risk synchronization loss; markings contradict the assumed model/frequency; raw captures include neighboring devices; the test would require defeating a seal/warranty; or any next step requires secret recovery, replay, firmware bypass, or undocumented receiver manipulation. Escalate to Hiland, the original installer, a qualified gate technician/locksmith, an RF lab, or local counsel as appropriate.",
+  "recommended_next_steps": [
+    "Photograph and transcribe all external T5502 labels and, only if safely authorized, the existing PCB/encoder/resonator markings; preserve the original battery orientation and avoid modifications.",
+    "With a fresh correct 23A battery and a receive-only RF chain, collect the minimum captures needed for each button in a safe location outside receiver range; report only aggregate carrier, bandwidth, timing, repeat and change/stability observations.",
+    "Compare the results with 433.92 MHz and the HCS301 public waveform family; treat a match as candidate compatibility only.",
+    "Use invoices, operator/controller labels and installer/OEM support to identify the receiver and obtain written confirmation of T5502 part/revision, learning method, slots and revocation behavior.",
+    "Acquire a genuine, returnable replacement and have the owner/authorized installer enroll and test it under the exact receiver manual."
+  ],
+  "questions_for_owner_or_vendor": [
+    "Is the case and PCB explicitly marked Hiland T5502, and what are the complete PCB revision, encoder and resonator markings?",
+    "Which country/market and installation date apply, and is the expected carrier 433.92 MHz or another regional variant?",
+    "What receiver/operator make, model, board revision and firmware appear on invoices, labels or service records?",
+    "Does the OEM explicitly list this exact T5502 revision for that receiver and learning method?",
+    "Is remote-assisted self-learning supported and administrator-enabled, or is local receiver access required?",
+    "How many credential slots exist, what happens when full, and can one lost remote be revoked without erasing all others?",
+    "Will the supplier warrant authenticity, OEM provisioning-domain compatibility, and allow return after a failed authorized enrollment?"
+  ],
+  "rollback_and_acceptance_test": "Before any later enrollment, inventory every existing remote/channel and obtain the exact receiver backup/reset/erase policy from the manual or installer. Make no receiver changes during RF characterization. For supervised acceptance, clear the door/gate area, have an emergency stop/manual release available, confirm all safety edges/photocells first, enroll only one documented new credential, test each intended channel once from a safe position, confirm unintended channels do nothing, then verify every pre-existing remote still works. On failure, stop rather than repeatedly pressing or erasing memory; remove the new credential using the receiver's documented per-credential process if available, or have the authorized installer restore the recorded configuration.",
+  "uncertain": [
+    "source_dates.Hiland live product page publication date",
+    "source_dates.Reids Remotes listing publication date",
+    "access_and_provisioning.receiver_make_model_firmware",
+    "access_and_provisioning.receiver_memory_and_revocation",
+    "route_assessment.product_status_and_authenticity exact lifecycle and authorized-channel status",
+    "technical_characterization exact hardware revision and regional variant of the requester's unit"
+  ]
+}

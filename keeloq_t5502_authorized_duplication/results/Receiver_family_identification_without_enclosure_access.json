@@ -1,0 +1,150 @@
+{
+  "item_name": "Receiver family identification without enclosure access",
+  "category": "System identification",
+  "question_answered": "How can an owner identify the receiver family, firmware/revision, OEM provisioning domain, memory policy and T5502 compatibility using records, exterior evidence, authorized support and limited supervised behavior when the receiver enclosure cannot be opened?",
+  "applicability_to_t5502_hcs301": "Directly applicable to a Hiland T5502 candidate, but an HCS301 encoder mark and 433.92 MHz signal identify only broad technology. Hiland publishes multiple rolling- and fixed-code receivers with different capacities, and T5502 self-learning is stated to work only with some receivers. Exact compatibility therefore depends on the installed receiver/model/revision and cannot be inferred from the remote IC alone.",
+  "authorization_assumption": "The requester owns or is explicitly authorized to administer the gate/door/access system, may inspect existing records and exterior labels, and will contact the installer/OEM using truthful ownership evidence. No enclosure, account, credential, or safety interlock is bypassed.",
+  "key_findings": [
+    "Manufacturer fact: Hiland identifies T5502 as a three-channel, 433.92 MHz rolling-code transmitter and describes transmitter-assisted self-learning only for some receivers.",
+    "Manufacturer fact: Hiland's R5401-R5408 family manual shows that externally similar receiver-family members differ in rolling versus fixed code and in stated capacity (30, 60, 300 or 600 depending on model). Exact model identification is therefore required before assuming memory or enrollment behavior.",
+    "Manufacturer fact: the R5401-R5408 manual describes local learn, whole-memory delete, channel mapping and an existing-transmitter self-learning function for that family. These procedures must not be generalized to an unknown receiver.",
+    "Architecture fact: Microchip explains that KeeLoq learning makes the receiver derive/use a transmitter crypt key and store serial/counter/key state. A matching frequency or HCS301 data format does not identify the OEM manufacturer-code domain.",
+    "Best identification hierarchy: installer invoice/commissioning sheet and service history; make/model/revision/serial on externally visible operator or receiver labels; exact OEM manuals and product records; installer/distributor/OEM confirmation; regulatory ID records where present; only then behavior as corroboration.",
+    "Inference: LED blink patterns, number of outputs, audible relays, working range, response to buttons and whether an authorized self-learning attempt is supported can narrow candidates, but behavior is not unique enough to establish firmware or manufacturer-key domain.",
+    "No-enclosure conclusion: strong identification is often possible from records and exterior labels; absent those, receiver family/firmware/key domain and memory policy remain uncertain, and a guaranteed replacement should come from the original installer/OEM or follow a receiver migration plan."
+  ],
+  "primary_sources": [
+    {
+      "title": "Hiland T5XXX Transmitter product page",
+      "url": "https://www.hiland.cc/Transmitter/T5XXX",
+      "accessed": "2026-10-01",
+      "supports": "T5502 identity and receiver-dependent self-learning statement."
+    },
+    {
+      "title": "Hiland R5401-R5408 4-channel receiver user manual V9",
+      "url": "https://www.hiland.cc/system/storage/download/556/Receiver%20R5403%20user%20manual%20V9%20A4.pdf",
+      "accessed": "2026-10-01",
+      "supports": "Receiver model variants, frequency/code type, capacity, local learning, whole-memory deletion, channel mapping and transmitter-assisted self-learning for this specific family."
+    },
+    {
+      "title": "Hiland 2023-2024 product catalogue",
+      "url": "https://am.hiland.cc/catalog/view/556/%E7%9B%AE%E5%BD%95%E5%86%8C2023-2024-1.pdf",
+      "accessed": "2026-10-01",
+      "supports": "T5502 model, 433.92 MHz, three channels, rolling code and battery specification."
+    },
+    {
+      "title": "Microchip HCS301 KeeLoq Code Hopping Encoder Data Sheet, DS21143C",
+      "url": "https://ww1.microchip.com/downloads/en/devicedoc/21143c.pdf",
+      "accessed": "2026-10-01",
+      "supports": "Learning models, crypt key/manufacturer code, receiver-stored serial/counter/key information and synchronization architecture."
+    },
+    {
+      "title": "Microchip KeeLoq Technology FAQs",
+      "url": "https://www.microchip.com/en-us/products/wireless-connectivity/features/security/ultimate-keeloq-technology/keeloq-technology-faqs",
+      "accessed": "2026-10-01",
+      "supports": "Manufacturer-domain and learning concepts and the distinction between RF format and accepted credentials."
+    },
+    {
+      "title": "FCC Equipment Authorization System grantee registrations and program description",
+      "url": "https://opendata.fcc.gov/Engineering-Technology/EAS-Equipment-Authorization-Grantee-Registrations/3b3k-34jp",
+      "accessed": "2026-10-01",
+      "supports": "Official provenance for using an FCC ID/grantee record, if one is present, to identify the responsible grantee and authorization records; an FCC ID is regulatory evidence, not protocol compatibility proof."
+    }
+  ],
+  "secondary_sources": [
+    {
+      "title": "Reids Remotes: Hiland T5502 product listing",
+      "url": "https://www.reidsremotes.com.au/home/2748-hiland-t5502-3-button-black-rolling-code-remote-control.html",
+      "accessed": "2026-10-01",
+      "limitation": "Dealer-origin compatibility list and offer to identify products from PCB/receiver photos; useful lead but not authoritative for an unseen receiver or every revision."
+    },
+    {
+      "title": "Desar Hiland SLG2804/SLG54004 product page",
+      "url": "https://desar.cl/producto/hiland/",
+      "accessed": "2026-10-01",
+      "limitation": "Integrator/reseller page linking T5502 with specific gate-operator offerings; it demonstrates how installer records can connect remote and operator but does not prove the requester's receiver identity."
+    }
+  ],
+  "evidence_quality": "High for the HCS301 architecture and for the listed R540x manual behavior because the sources are the component and receiver manufacturers. Moderate for exact T5502-to-receiver compatibility: Hiland states self-learning applies to some receivers but does not provide, in the located sources, a complete firmware/revision compatibility matrix or manufacturer-domain identifier. Low if identification rests only on behavior, remote appearance or dealer lists. No evidence identifies the requester's actual receiver or firmware without their records/labels.",
+  "source_dates": [
+    "Hiland R540x manual V9: web index indicates approximately 2017 [uncertain]; the PDF itself should be checked for its printed revision/date; accessed 2026-10-01.",
+    "Hiland catalogue: 2023-2024; accessed 2026-10-01.",
+    "Hiland live T5XXX page: publication date not stated [uncertain]; accessed 2026-10-01.",
+    "Microchip DS21143C: 2011 revision; accessed 2026-10-01.",
+    "FCC open-data page: current page, publication date not material; accessed 2026-10-01.",
+    "Dealer/integrator pages: publication dates not stated [uncertain]; accessed 2026-10-01."
+  ],
+  "source_claim_type": [
+    "Hiland receiver manual/catalogue/product page: manufacturer documentation or vendor claim.",
+    "Microchip datasheet/FAQ: primary component documentation.",
+    "FCC dataset/program page: official regulatory source.",
+    "Reids Remotes and Desar: dealer/integrator statements.",
+    "Identification hierarchy and limits of behavioral fingerprinting: evidence-based engineering inference."
+  ],
+  "relevant_components": "T5502 transmitter and its labels/PCB marks; HCS301 encoder if verified; gate/door operator; any separate add-on RF receiver; external receiver/operator label; antenna and external wiring only insofar as visible without opening; receiver firmware and stored credential database; safety controller; installer commissioning records; invoices, warranty cards and service logs; OEM/distributor serial-number databases; and regulatory authorization records.",
+  "hardware_revision_and_markings": "Collect exact text/photos from accessible surfaces: operator brand/model/serial; add-on receiver label; regulatory IDs (FCC/CE/RCM and country approvals); supply rating; manufacture date/lot; installer sticker/phone; antenna-module branding; remote case and PCB part/revision; HCS301 full top mark; resonator marking; and any QR/barcode. Do not remove covers, defeat seals, touch mains wiring, or infer the receiver from the operator housing alone because a third-party add-on receiver may be installed.",
+  "power_variant": "For the reference transmitter, Hiland specifies a 12 V 23A battery. Receiver supply and operator voltage are unknown [uncertain] and must come from an exterior rating plate, invoice, or exact manual. Power ratings do not establish protocol compatibility.",
+  "rf_profile": "Hiland identifies documented T5502 as 433.92 MHz rolling code. Passive observation can corroborate this and distinguish an obvious wrong-frequency system, but cannot reveal the receiver's accepted OEM key domain, firmware or memory policy. Do not use receiver-response probing, replay, jamming or generated frames as an identification technique.",
+  "observable_data": "Safe observations include exact exterior labels; installation age/location; operator and add-on-receiver appearance; antenna location; indicator behavior during ordinary authorized use; which existing button controls which function; whether every enrolled remote still works; approximate normal range; and whether the receiver gives a documented response during a supervised OEM-approved enrollment attempt. Record timestamps and video only with site permission. Treat behavior as corroboration, not a unique fingerprint.",
+  "protected_or_secret_data": "Manufacturer code/derivation material, transmitter crypt keys or seeds, receiver credential list, installer/admin codes, rolling counters and service-account data are security-sensitive. Ask support for compatibility and provisioning service, not disclosure of secrets. This research gives no recovery or bypass method.",
+  "manufacturer_key_domain_evidence": "Strong non-secret evidence consists of an OEM/installer statement that the exact receiver model/revision/region accepts the exact T5502 part/revision, an authorized replacement part number tied to the installation, a factory provisioning order, or successful enrollment under the documented process. A common HCS301 IC, 433.92 MHz carrier, similar packet shape, enclosure resemblance or generic 'rolling code' label is not evidence of a common domain.",
+  "compatibility_constraints": "Identify the actual receiver, including any add-on unit separate from the motor controller; its frequency/region; rolling-versus-fixed code variant; protocol and learning type; manufacturer key domain; supported transmitter part numbers/revisions; firmware; channel/output mapping; memory size and full-memory behavior; counter resynchronization policy; remote-assisted-learning enablement; and regulatory region. The R540x manual shows why exact suffix matters: members differ in code type and capacity.",
+  "variant_conflicts": "The T5502 is associated by manufacturer material with 433.92 MHz rolling code, while broader T5XXX material mentions 318 MHz variants; resolve using the exact remote label/resonator and passive carrier measurement. An operator brand may differ from the add-on receiver brand. R5401/R5402 versus R5403/R5404 differ in stated rolling-code capacity, while R5405-R5408 are documented as fixed code; resolve via exact exterior model, invoice, installer record or OEM serial lookup. Do not apply the R540x procedure to another family merely because LEDs or buttons look similar.",
+  "access_assumption": "No receiver-enclosure access is available. Administrative access may or may not exist; RF reach for normal authorized observation may exist; receiver participation may be possible through a documented remote-assisted learn route. These are separate conditions and must be recorded independently.",
+  "receiver_dependency": "Documentary identification can proceed without receiver participation. Firmware, current memory occupancy, enabled self-learning, channel mapping and actual acceptance generally require OEM database evidence or receiver participation under an authorized procedure.",
+  "receiver_make_model_firmware": "Unknown for the requester's installation [uncertain]. Establish in descending reliability from invoice/commissioning sheet and service records; exterior receiver/operator label and serial; installer database; OEM/distributor serial lookup; exact manual matching; regulatory ID exhibits; then cautious behavioral corroboration. Firmware may be unavailable without an authorized diagnostic visit even after family identification.",
+  "physical_access_vs_receiver_participation": "No internal physical access is required to gather records, read exterior labels, contact support or conduct passive observations. A supported transmitter-assisted self-learn feature can involve receiver participation over the air without enclosure access, but it is not 'no receiver involvement' and must be confirmed for the exact model/firmware before use.",
+  "existing_authorized_remote_required": "Usually yes for remote-assisted self-learning or behavior comparison; not required for record/label/OEM identification.",
+  "enrollment_method_and_authority": "Use only the exact OEM-documented method after identity is established. For the cited R540x family, Hiland documents local receiver learning and an existing-transmitter-assisted self-learning function; only the owner/authorized administrator or installer should invoke either, and generic sequences must not be tried against an unidentified installation.",
+  "credential_semantics": "A supported route enrolls a distinct transmitter credential or supplies an OEM-provisioned compatible replacement. It does not create a cryptographic duplicate of the old transmitter. Identification alone creates no credential.",
+  "receiver_memory_and_revocation": "The cited Hiland R540x manual lists 30 stored transmitters for R5401/R5402, 300 for R5403/R5404, 60 for fixed-code R5405/R5406 and 600 for fixed-code R5407/R5408, and documents a long-press whole-memory deletion procedure. These values/actions apply only if that exact family/model is confirmed. Current occupancy, full-memory behavior, individual deletion, audit trail and firmware differences are unknown [uncertain]; obtain them from the exact manual or authorized installer before enrollment.",
+  "legitimate_routes": [
+    "Retrieve the original quotation, invoice, installation/commissioning sheet, warranty registration, remote purchase records and service history; ask the property manager or prior owner where appropriate.",
+    "Photograph accessible operator, receiver, antenna and installer labels without opening covers; search exact manufacturer part numbers and regulatory IDs in official documentation.",
+    "Give the serial/model, installation date and ownership proof to the original installer, Hiland or an authorized distributor and request the receiver family, revision, supported transmitter SKU, enrollment method, memory capacity and revocation procedure in writing.",
+    "Use passive RF characterization of the owned T5502 only to corroborate the stated region/frequency and reject mismatches.",
+    "If identity remains unresolved, book an authorized site visit; if access cannot be obtained or the product is unsupported, migrate to a documented receiver/add-on receiver with new unique credentials."
+  ],
+  "prerequisites": "Ownership/authorization evidence; installation address/serials; permission to photograph common-property equipment if applicable; all available paperwork; the existing authorized remote; a list of current users/remotes/channels; safe operating conditions; and contact details for the original installer/OEM/distributor.",
+  "equipment_or_service_needed": "Camera/phone for legible label photos, document scanner, receive-only RF analyzer only if frequency corroboration is useful, access to official manual/regulatory databases, and potentially an authorized gate/garage installer or locksmith. No cryptographic, replay or transmission attack tooling is required.",
+  "expected_outcomes": "Best case: exact receiver/add-on model, revision/region, supported T5502 replacement SKU, authorized enrollment route, memory capacity and deletion policy. Intermediate case: a bounded receiver family and list of facts an installer must verify. Worst case: identity remains unproven, but uncertainty is documented and receiver migration is selected instead of risking an incompatible or insecure 'clone.'",
+  "limitations": "Invoices may describe only the motor, not a later add-on receiver; labels may be hidden or weathered; installers may have closed or incomplete records; OEMs may not disclose firmware/domain details; white-label products can use multiple boards; behaviors overlap across models; regulatory IDs identify certified hardware/grantee, not necessarily installed firmware or cryptographic provisioning; self-learning may be disabled or unsupported. Without receiver participation, exact memory occupancy and acceptance cannot normally be confirmed.",
+  "cost_or_effort_band": "Low for paperwork, exterior labels and support inquiries; medium for an installer visit or serial lookup; medium-to-high for receiver migration. Confidence generally improves more from authoritative records than from extended behavioral testing.",
+  "route_classification": "System identification leading to authorized replacement/enrollment, OEM provisioning, or receiver migration; not cryptographic duplication.",
+  "product_status_and_authenticity": "Hiland has a live T5502 page and a 2023-2024 catalogue, but exact lifecycle, firmware support window and authorized-channel status for the installed receiver are unknown [uncertain]. Verify seller identity, invoice traceability, PCB/label match, warranty and returns. Counterfeit/rebranded remotes may duplicate appearance and RF frequency while lacking the required OEM provisioning domain.",
+  "feasibility_without_receiver": "Without physical enclosure access, exact identification is feasible when invoices, exterior labels, serial lookups or installer records exist. Without administrative access, information gathering remains feasible but enrollment must wait for the authorized administrator. Without any receiver participation, frequency/family compatibility may be assessed, but firmware, current memory state and final credential acceptance cannot be proven. A vendor-guaranteed OEM part tied to an authoritative receiver record is the strongest no-participation route.",
+  "confidence": "High in the documentary hierarchy and the claim that HCS301/frequency alone is insufficient; high for the cited R540x family specifications; moderate that exterior/documentary evidence will identify a particular real installation because add-on receivers and undocumented changes are common; low for any identity based only on observed behavior.",
+  "legal_or_authorization_notes": "Access-control records, serials and credential inventories may be personal or security-sensitive. Obtain property-owner/body-corporate permission, follow local privacy and access laws, share the minimum necessary data with verified support channels, and use licensed installers where electrical, gate-safety or regulated work requires it. Seek local counsel if ownership or administrative authority is disputed.",
+  "operational_risks": "Unsupervised button tests can move heavy machinery; generic learn/delete sequences can erase every remote or open enrollment; repeated presses can advance counters and cause synchronization trouble; misidentification can waste money or enroll the wrong channel; disclosing labels/serials/captures can aid social engineering; touching the enclosure may expose mains voltage or void warranty. Keep normal-use observations minimal, supervised and documented, and never test delete/reset behavior for identification.",
+  "enrollment_side_effects": "Receiver-specific. The R540x manual documents learning and a whole-memory deletion operation, illustrating the risk that a mistaken long press can revoke all users. Learning may consume the last slot, change channel behavior, or supersede a credential on other families. Establish exact model, capacity, occupancy, backup/recovery and per-credential revocation before any enrollment attempt.",
+  "prohibited_actionable_details_omitted": "Yes. Key/seed extraction, cryptographic attacks, rolling-code defeat, replay, brute force, receiver bypass and unauthorized-access instructions are omitted.",
+  "stop_conditions": "Stop if ownership/administrator authority is unclear; the only model clue requires opening a powered or sealed enclosure; the gate area cannot be secured; a proposed identification step would enter learn/delete/reset mode on an unknown receiver; labels/records conflict; support asks for secrets or raw captures through an unverified channel; the original remote begins failing after repeated tests; or the route shifts toward replay, secret recovery or bypass. Engage the property administrator, original installer, Hiland/authorized distributor, qualified gate technician/locksmith, electrician or local counsel as applicable.",
+  "recommended_next_steps": [
+    "Build a one-page evidence sheet: installation address/owner authorization, operator and any accessible receiver labels, all remote markings/PCB revision, installation/service dates, invoice line items and photos.",
+    "Contact the original installer first; ask them to search the job/serial record for the actual RF receiver or add-on receiver, firmware/revision, supported T5502 SKU and learning/memory policy.",
+    "Cross-check the returned model against the exact official manual and regulatory record; distinguish operator controller from separate radio receiver.",
+    "Use a minimal passive carrier check only if regional frequency remains ambiguous; do not treat waveform similarity as domain proof.",
+    "Obtain a genuine returnable OEM replacement or authorized installer service. If identity/support cannot be established, prefer a documented receiver/add-on migration with new unique credentials and revocation controls."
+  ],
+  "questions_for_owner_or_vendor": [
+    "Who installed and last serviced the system, and is there an invoice, commissioning sheet, warranty registration or account/job number?",
+    "Is there a separate add-on receiver, and what exact exterior model, serial, revision/date, regulatory ID and region appear on it or the operator?",
+    "Which exact T5502 part/PCB revision is approved for this receiver and firmware, and is compatibility guaranteed in writing?",
+    "Does the receiver use local learn, remote-assisted self-learning, factory provisioning or another authorized method, and who is permitted to invoke it?",
+    "Is self-learning supported/enabled on this firmware, and does it require a currently enrolled remote?",
+    "What is total and remaining credential capacity; what happens when full; can a single lost remote be revoked; does any procedure erase all credentials?",
+    "What are channel mappings, synchronization/recovery rules, audit capabilities and rollback steps?",
+    "Is the proposed replacement genuine, from the same OEM provisioning domain and region, covered by warranty, and returnable after failed authorized enrollment?"
+  ],
+  "rollback_and_acceptance_test": "Before enrollment, inventory each existing remote/user and verify every current button/channel under supervision; photograph/document configuration and obtain the exact model-specific recovery and revocation procedure. Clear people/vehicles from the gate/door path, verify photocells/safety edges/manual stop, and ensure the authorized administrator is present. Enroll only one new unique credential, then test intended functions and confirm unintended outputs remain inactive; retest all old remotes and access/safety functions. If any legacy remote stops, channel behavior changes, memory appears full or identity conflicts arise, stop and have the installer remove the new credential or restore the documented configuration. Never use an unknown reset/delete sequence as rollback.",
+  "uncertain": [
+    "evidence.source_dates exact R540x manual publication date",
+    "evidence.source_dates Hiland live T5XXX page publication date",
+    "evidence.source_dates dealer and integrator page publication dates",
+    "technical_characterization.power_variant receiver/operator supply",
+    "access_and_provisioning.receiver_make_model_firmware",
+    "access_and_provisioning.receiver_memory_and_revocation current occupancy, individual deletion, audit and firmware behavior",
+    "route_assessment.product_status_and_authenticity receiver lifecycle, firmware support and authorized-channel status",
+    "technical_characterization exact installed receiver, add-on receiver, region and OEM provisioning domain"
+  ]
+}
