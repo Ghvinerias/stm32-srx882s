@@ -1,13 +1,15 @@
 # STM32 RF Lab — Android app (WIP)
 
-**Status: protocol primitives, raw packet layer, USB transport and HCS301
-decoder in place** (session 5 of the 10-session plan in [`PLAN.md`](PLAN.md));
-the authoritative protocol and decode details live in
-[`AGENT_BRIEF.md`](AGENT_BRIEF.md).
+**Status: protocol primitives, raw packet layer, USB transport, HCS301
+decoder and live receive screen in place** (session 6 of the 10-session
+plan in [`PLAN.md`](PLAN.md)); the authoritative protocol and decode
+details live in [`AGENT_BRIEF.md`](AGENT_BRIEF.md).
 
-There is no UI wiring yet. The app still opens on a three-tab shell with
-placeholder **Connect**, **Receive** and **Send** screens; session 6/9 will
-bind the transport and decoder to them.
+The **Receive** tab is now live: it decodes FRAME packets from the current
+connection, collapses press repeats into rows and can copy selected rows to
+a shared send queue. **Connect** and **Send** are still placeholders
+(sessions 9 and 7 respectively), so with no connection the receive list
+shows its empty state.
 
 ## What exists
 
@@ -56,6 +58,34 @@ bind the transport and decoder to them.
     and repeat LSB-first. `DecodedSignal` carries those fields plus the
     source `FramePacket` timestamp/sequence and the scale used.
 - `com.github.mik3y:usb-serial-for-android:3.11.0` dependency.
+- `com.eelab.rflab.ui.receive` and the live `ReceiveScreen` (session 6):
+  - `ReceiveViewModel` subscribes to a `Flow<TransportEvent>`, keeps one
+    running `ScaleEstimator` for the ViewModel (adding every frame's
+    pulses before decoding, including malformed ones), and runs
+    `Hcs301Decoder.decodeFrame` at the current scale. Rejected frames and
+    non-FRAME packets are dropped.
+  - `ReceivedSignalAccumulator` collapses decodes with the same
+    hopping+serial+button that arrive within **500 ms** of the previous
+    decode into one row (`repeatCount`, first-seen timestamp retained).
+    Grouping uses host arrival time from an injected clock, not the device's
+    32-bit microsecond timestamp (which wraps every ~71 min).
+  - Rows are newest first; tapping a row or its checkbox toggles selection,
+    and "Add N to send queue" copies every selected row into
+    `SendQueueRepository.shared` as `SendQueueItem(id, hopping, serial,
+    button)` and clears the selection. The header shows the current queue
+    size.
+  - The screen is split into a stateful wrapper plus a stateless body, so
+    the row/selection/queue UI has no ViewModel or USB dependency.
+- `com.eelab.rflab.queue.SendQueueRepository` (session 6 minimum): a
+  process-wide `StateFlow<List<SendQueueItem>>` with `enqueue`, `remove` and
+  `clear`. Session 7 extends the item model (frame count, manual entry) and
+  renders it; session 8 sends it.
+- `com.eelab.rflab.usb.RfLabSession`: placeholder holder for the current
+  `RfLabConnection`. `attach`/`detach` are unused until session 9 wires the
+  Connect screen; `events` is empty while nothing is attached.
+- Dependencies added for the ViewModel/Compose wiring:
+  `lifecycle-runtime-compose`, `lifecycle-viewmodel-ktx`,
+  `lifecycle-viewmodel-compose`, and `kotlinx-coroutines-test` for JVM tests.
 - USB host feature declared, plus `res/xml/device_filter.xml` matching the lab
   board (VID `0xCAFE` / PID `0x4001`, decimal `51966` / `16385`) and an
   `USB_DEVICE_ATTACHED` intent filter.
@@ -75,6 +105,18 @@ The debug APK lands in `app/build/outputs/apk/debug/`.
 
 ## Notes for later sessions
 
+- Session 7 reads `SendQueueRepository.shared.items` and can render/reorder/
+  remove from it. The repository assigns ids and allows duplicates on
+  purpose; the receive screen only appends.
+- Session 9 must call `RfLabSession.attach(connection)` after
+  `RfLabConnection.open(...)` succeeds and `RfLabSession.detach()` on
+  disconnect. The receive ViewModel already observes `RfLabSession.events`;
+  no UI change is needed there.
+- The receive screen keeps one `ScaleEstimator` for the ViewModel's
+  lifetime, matching the brief's per-connection-session scale. Session 9 can
+  start a fresh receive ViewModel when opening a new connection if it wants
+  calibration restarted for a different transmitter; reusing the pooled
+  estimate still decodes, it just mixes both transmitters' data cells.
 - `RfLabConnection.events` has no replay: subscribe before connecting if
   every packet matters. The buffer applies backpressure rather than dropping
   packets under a slow collector.
