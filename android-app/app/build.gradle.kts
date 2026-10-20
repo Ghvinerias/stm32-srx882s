@@ -41,6 +41,13 @@ android {
         compose = true
     }
 
+    testOptions {
+        // The ViewModels log through android.util.Log on failure paths; JVM
+        // unit tests exercise those paths (link loss, failed send) and the
+        // stub Log would otherwise throw "not mocked".
+        unitTests.isReturnDefaultValues = true
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"

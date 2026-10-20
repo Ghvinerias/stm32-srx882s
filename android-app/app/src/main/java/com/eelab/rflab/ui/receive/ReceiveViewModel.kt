@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -28,41 +29,33 @@ import kotlinx.coroutines.launch
  * connection session, as the brief requires) -> [Hcs301Decoder]. Valid
  * decodes go into a [ReceivedSignalAccumulator], which collapses repeats.
  *
- * Frame length/noise rejections, STATUS/ACK packets and transport decode
- * errors are ignored here: the receive screen only lists successfully
- * decoded HCS301 frames. (Session 10 owns surfacing link errors.)
+ * Frame length/noise rejections are simply skipped. [TransportEvent.DecodeError]
+ * events (bad COBS, bad CRC, truncated/foreign packets) are counted and shown
+ * in the header, but never reach the decoder: a stream of corrupt frames
+ * cannot crash the screen or stop later valid frames from being decoded.
+ * STATUS/ACK packets are ignored here — the Connect screen owns STATUS and
+ * the send engine owns ACKs.
  *
  * Decoding 65 cells per frame is cheap, so it runs on the collecting
  * dispatcher rather than introducing another thread hop; the USB reader is
  * already off the main thread.
  *
- * @param signals decoded signals to accumulate. Production code uses the
- *   constructor below that takes transport events; this overload is the
- *   test seam for feeding controlled decoded signals.
+ * @param signals decoded signals to accumulate. [create] builds this from
+ *   transport events; tests feed controlled decoded signals directly.
  * @param sendQueue shared queue that selected rows are copied into.
  * @param clock host arrival time in milliseconds. Injectable so grouping is
  *   testable without wall-clock sleeps.
  * @param accumulator repeat-collapsing state; inject one to control the
  *   grouping window or seed state in a test.
+ * @param decodeErrorCount running count of malformed transport frames.
  */
 class ReceiveViewModel(
     signals: Flow<DecodedSignal>,
     private val sendQueue: SendQueueRepository = SendQueueRepository.shared,
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val accumulator: ReceivedSignalAccumulator = ReceivedSignalAccumulator(),
+    private val decodeErrorCount: StateFlow<Int> = MutableStateFlow(0),
 ) : ViewModel() {
-
-    /**
-     * Production constructor: decode [transportEvents] into signals first.
-     *
-     * Subscribe before the connection opens if every frame matters
-     * ([com.eelab.rflab.usb.RfLabConnection.events] has no replay).
-     */
-    constructor(
-        transportEvents: Flow<TransportEvent>,
-        sendQueue: SendQueueRepository = SendQueueRepository.shared,
-        clock: () -> Long = { System.currentTimeMillis() },
-    ) : this(decodeSignals(transportEvents), sendQueue, clock)
 
     private val _uiState = MutableStateFlow(ReceiveUiState())
 
@@ -79,6 +72,11 @@ class ReceiveViewModel(
         viewModelScope.launch {
             sendQueue.items.collect { items ->
                 _uiState.update { it.copy(queueSize = items.size) }
+            }
+        }
+        viewModelScope.launch {
+            decodeErrorCount.collect { count ->
+                _uiState.update { it.copy(decodeErrorCount = count) }
             }
         }
     }
@@ -132,25 +130,58 @@ class ReceiveViewModel(
         const val REPEAT_GROUP_WINDOW_MS = ReceivedSignalAccumulator.DEFAULT_GROUP_WINDOW_MS
 
         /**
-         * ViewModel factory wired to the placeholder connection holder.
-         * Session 9 replaces [com.eelab.rflab.usb.RfLabSession]'s placeholder
-         * with the real connect lifecycle; this call site does not change.
+         * Builds the production ViewModel that decodes `RfLabSession.events`.
+         *
+         * The decoder and its running [ScaleEstimator] are created here, once
+         * per ViewModel: the app root creates this ViewModel as soon as the
+         * process starts, so frames are decoded from the moment the first
+         * connection attaches, not only after the Receive tab is first opened.
          */
+        fun create(
+            transportEvents: Flow<TransportEvent>,
+            sendQueue: SendQueueRepository = SendQueueRepository.shared,
+            clock: () -> Long = { System.currentTimeMillis() },
+        ): ReceiveViewModel {
+            val decodeErrors = MutableStateFlow(0)
+            return ReceiveViewModel(
+                signals = decodeSignals(transportEvents, decodeErrors),
+                sendQueue = sendQueue,
+                clock = clock,
+                decodeErrorCount = decodeErrors,
+            )
+        }
+
+        /** ViewModel factory for [create]; used by the app composition root. */
         fun factory(
             transportEvents: Flow<TransportEvent>,
             sendQueue: SendQueueRepository = SendQueueRepository.shared,
         ): ViewModelProvider.Factory = viewModelFactory {
-            initializer { ReceiveViewModel(transportEvents, sendQueue) }
+            initializer { create(transportEvents, sendQueue) }
         }
 
         /**
          * Feeds every frame's pulses through the running scale estimator
          * (even malformed ones, matching `decode_hcs301.py`) and decodes at
-         * the current scale. Rejected frames are dropped.
+         * the current scale. Rejected frames are dropped; transport-level
+         * decode errors are counted and the estimator is reset when the link
+         * is lost (the next connection may be a different transmitter).
          */
-        private fun decodeSignals(events: Flow<TransportEvent>): Flow<DecodedSignal> {
+        internal fun decodeSignals(
+            events: Flow<TransportEvent>,
+            decodeErrors: MutableStateFlow<Int>,
+        ): Flow<DecodedSignal> {
             val estimator = ScaleEstimator()
             return events
+                .onEach { event ->
+                    when (event) {
+                        is TransportEvent.DecodeError ->
+                            decodeErrors.update { it + 1 }
+
+                        is TransportEvent.ConnectionLost -> estimator.reset()
+
+                        is TransportEvent.PacketReceived -> Unit
+                    }
+                }
                 .filterIsInstance<TransportEvent.PacketReceived>()
                 .mapNotNull { (it.packet as? FramePacket) }
                 .mapNotNull { frame ->

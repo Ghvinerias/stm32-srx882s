@@ -16,6 +16,8 @@ import org.junit.Test
  * python3 tools/decode_hcs301.py tools/captures/r1-btn-1.ndjson
  * python3 tools/decode_hcs301.py tools/captures/r3-test.ndjson
  * python3 tools/decode_hcs301.py tools/captures/r3-new-test.ndjson
+ * python3 tools/decode_hcs301.py tools/captures/hold-btn1.ndjson
+ * python3 tools/decode_hcs301.py tools/captures/r3-usb-sanity.ndjson
  * ```
  *
  * For each capture the test estimates the scale exactly as the Python tool
@@ -23,6 +25,12 @@ import org.junit.Test
  * frame, and requires the same hopping/serial/button/vlow/repeat values.
  * `r3-test` matters most for the estimator: its transmitter runs ~4% slow,
  * so the auto scale is 1.0404 rather than 1.0.
+ *
+ * `hold-btn1` (a held button producing several buttons in one capture) and
+ * `r3-usb-sanity` (34 frames captured end-to-end through the USB link) were
+ * added in the final integration session as extra real-world regression
+ * gates; both come from the same ~4% slow transmitter, decoded with the same
+ * 1.0404 scale.
  */
 class RealCaptureDecodeTest {
 
@@ -193,6 +201,89 @@ class RealCaptureDecodeTest {
                 Expected(8212, 0xCF3EED68L, 0xFB3EC77L, 0x2, 0, 1),
                 Expected(8214, 0xCF3EED68L, 0xFB3EC77L, 0x2, 0, 1),
                 Expected(8215, 0xCF3EED68L, 0xFB3EC77L, 0x2, 0, 1),
+            ),
+        )
+    }
+
+    /**
+     * Held-button capture: one button held for ~0.5 s per button nibble
+     * (0x2, 0x4, 0x8), each producing a stable hopping word plus its
+     * repeats. All 18 frames are 77 pulses and decode.
+     */
+    @Test
+    fun holdBtn1MatchesPython() {
+        assertCaptureMatchesPython(
+            capture = "hold-btn1",
+            expectedScale = 1.0404217926186292,
+            expected = listOf(
+                Expected(393, 0x37ABC19FL, 0xFB3EC77L, 0x2, 0, 0),
+                Expected(394, 0x37ABC19FL, 0xFB3EC77L, 0x2, 0, 1),
+                Expected(395, 0x37ABC19FL, 0xFB3EC77L, 0x2, 0, 1),
+                Expected(397, 0x37ABC19FL, 0xFB3EC77L, 0x2, 0, 1),
+                Expected(398, 0x37ABC19FL, 0xFB3EC77L, 0x2, 0, 1),
+                Expected(399, 0x37ABC19FL, 0xFB3EC77L, 0x2, 0, 1),
+                Expected(400, 0x4A8EBDC0L, 0xFB3EC77L, 0x4, 0, 0),
+                Expected(402, 0x4A8EBDC0L, 0xFB3EC77L, 0x4, 0, 1),
+                Expected(403, 0x4A8EBDC0L, 0xFB3EC77L, 0x4, 0, 1),
+                Expected(404, 0x4A8EBDC0L, 0xFB3EC77L, 0x4, 0, 1),
+                Expected(405, 0x4A8EBDC0L, 0xFB3EC77L, 0x4, 0, 1),
+                Expected(406, 0x4A8EBDC0L, 0xFB3EC77L, 0x4, 0, 1),
+                Expected(408, 0xCC5CF6CFL, 0xFB3EC77L, 0x8, 0, 0),
+                Expected(409, 0xCC5CF6CFL, 0xFB3EC77L, 0x8, 0, 1),
+                Expected(410, 0xCC5CF6CFL, 0xFB3EC77L, 0x8, 0, 1),
+                Expected(411, 0xCC5CF6CFL, 0xFB3EC77L, 0x8, 0, 1),
+                Expected(412, 0xCC5CF6CFL, 0xFB3EC77L, 0x8, 0, 1),
+                Expected(413, 0xCC5CF6CFL, 0xFB3EC77L, 0x8, 0, 1),
+            ),
+        )
+    }
+
+    /**
+     * 34-frame capture taken through the real USB link (the same path the
+     * app uses), covering three buttons and nine distinct hopping words.
+     * It exercises regrouping of many short presses instead of one held
+     * button, and all 34 frames decode.
+     */
+    @Test
+    fun r3UsbSanityMatchesPython() {
+        assertCaptureMatchesPython(
+            capture = "r3-usb-sanity",
+            expectedScale = 1.0404217926186292,
+            expected = listOf(
+                Expected(137, 0x27675251L, 0xFB3EC77L, 0x2, 0, 0),
+                Expected(138, 0x27675251L, 0xFB3EC77L, 0x2, 0, 1),
+                Expected(139, 0x27675251L, 0xFB3EC77L, 0x2, 0, 1),
+                Expected(141, 0x9DB279D7L, 0xFB3EC77L, 0x2, 0, 0),
+                Expected(142, 0x9DB279D7L, 0xFB3EC77L, 0x2, 0, 1),
+                Expected(143, 0x9DB279D7L, 0xFB3EC77L, 0x2, 0, 1),
+                Expected(144, 0x9DB279D7L, 0xFB3EC77L, 0x2, 0, 1),
+                Expected(146, 0x59F99831L, 0xFB3EC77L, 0x2, 0, 0),
+                Expected(147, 0x59F99831L, 0xFB3EC77L, 0x2, 0, 1),
+                Expected(148, 0x59F99831L, 0xFB3EC77L, 0x2, 0, 1),
+                Expected(149, 0x59F99831L, 0xFB3EC77L, 0x2, 0, 1),
+                Expected(151, 0xC0F31703L, 0xFB3EC77L, 0x4, 0, 0),
+                Expected(152, 0xC0F31703L, 0xFB3EC77L, 0x4, 0, 1),
+                Expected(153, 0xC0F31703L, 0xFB3EC77L, 0x4, 0, 1),
+                Expected(154, 0xC0F31703L, 0xFB3EC77L, 0x4, 0, 1),
+                Expected(156, 0x68A3CA8FL, 0xFB3EC77L, 0x8, 0, 0),
+                Expected(157, 0x68A3CA8FL, 0xFB3EC77L, 0x8, 0, 1),
+                Expected(158, 0x68A3CA8FL, 0xFB3EC77L, 0x8, 0, 1),
+                Expected(159, 0x68A3CA8FL, 0xFB3EC77L, 0x8, 0, 1),
+                Expected(161, 0x60627755L, 0xFB3EC77L, 0x4, 0, 0),
+                Expected(162, 0x60627755L, 0xFB3EC77L, 0x4, 0, 1),
+                Expected(163, 0x60627755L, 0xFB3EC77L, 0x4, 0, 1),
+                Expected(164, 0x60627755L, 0xFB3EC77L, 0x4, 0, 1),
+                Expected(166, 0x5F69B083L, 0xFB3EC77L, 0x2, 0, 0),
+                Expected(167, 0x5F69B083L, 0xFB3EC77L, 0x2, 0, 1),
+                Expected(168, 0x5F69B083L, 0xFB3EC77L, 0x2, 0, 1),
+                Expected(169, 0x5F69B083L, 0xFB3EC77L, 0x2, 0, 1),
+                Expected(170, 0xF1E79643L, 0xFB3EC77L, 0x4, 0, 0),
+                Expected(171, 0xF1E79643L, 0xFB3EC77L, 0x4, 0, 1),
+                Expected(173, 0xF1E79643L, 0xFB3EC77L, 0x4, 0, 1),
+                Expected(174, 0xAE9EDAFEL, 0xFB3EC77L, 0x8, 0, 0),
+                Expected(175, 0xAE9EDAFEL, 0xFB3EC77L, 0x8, 0, 1),
+                Expected(176, 0xAE9EDAFEL, 0xFB3EC77L, 0x8, 0, 1),
+                Expected(177, 0xAE9EDAFEL, 0xFB3EC77L, 0x8, 0, 1),
             ),
         )
     }

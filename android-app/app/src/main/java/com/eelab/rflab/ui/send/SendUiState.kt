@@ -51,8 +51,8 @@ data class ManualEntryState(
  * The six preset scenario commands exposed by the send screen.
  *
  * Order and characters match the brief: `'r'`, `'s'`, `'z'`, `'p'`, `'x'`,
- * `'d'`. The UI renders one button per entry; session 8 supplies the lambda
- * that actually writes the encoded command to the USB link.
+ * `'d'`. The UI renders one button per entry; the ViewModel supplies the
+ * lambda that actually writes the encoded command to the USB link.
  */
 enum class PresetScenario(
     val commandChar: Char,

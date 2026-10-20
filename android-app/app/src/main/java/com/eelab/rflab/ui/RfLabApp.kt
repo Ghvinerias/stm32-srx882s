@@ -23,11 +23,14 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.eelab.rflab.R
 import com.eelab.rflab.send.SendGraph
+import com.eelab.rflab.ui.receive.ReceiveViewModel
 import com.eelab.rflab.ui.screens.ConnectScreen
 import com.eelab.rflab.ui.screens.ReceiveScreen
 import com.eelab.rflab.ui.screens.SendScreen
+import com.eelab.rflab.usb.RfLabSession
 import com.eelab.rflab.usb.UsbConnectController
 
 private enum class Destination(
@@ -53,6 +56,11 @@ private enum class Destination(
  *   session, so tapping Connect on the first tab immediately feeds the
  *   others.
  *
+ * The receive ViewModel is created here rather than inside the Receive tab
+ * so it starts collecting [RfLabSession.events] as soon as the process does:
+ * frames that arrive while the user is still on the Connect tab are decoded
+ * and queued in the list instead of being missed.
+ *
  * Only the application context is retained: USB permission uses a
  * `PendingIntent` broadcast and does not require the Activity.
  */
@@ -66,6 +74,10 @@ fun RfLabApp() {
     val appContext = LocalContext.current.applicationContext
     // Survives recomposition and tab switches; owns no Activity reference.
     val connectPort = remember(appContext) { UsbConnectController(appContext) }
+    // Activity-scoped so it outlives tab navigation and decodes continuously.
+    val receiveViewModel: ReceiveViewModel = viewModel(
+        factory = ReceiveViewModel.factory(RfLabSession.events),
+    )
 
     Scaffold(
         bottomBar = {
@@ -100,7 +112,7 @@ fun RfLabApp() {
             modifier = Modifier.padding(innerPadding),
         ) {
             composable(Destination.Connect.route) { ConnectScreen(port = connectPort) }
-            composable(Destination.Receive.route) { ReceiveScreen() }
+            composable(Destination.Receive.route) { ReceiveScreen(viewModel = receiveViewModel) }
             composable(Destination.Send.route) { SendScreen(sendEngine = sendEngine) }
         }
     }

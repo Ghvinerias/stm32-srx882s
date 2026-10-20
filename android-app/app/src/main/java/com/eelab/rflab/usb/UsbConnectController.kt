@@ -69,6 +69,12 @@ class UsbConnectController(
         }
         if (!granted) return ConnectAttempt.PermissionDenied
 
+        // Defensive: the UI refuses to connect while one is attached, but if a
+        // stale connection is still in the session (for example the Connect
+        // ViewModel was recreated), close it before replacing it so the old
+        // port is never leaked.
+        RfLabSession.detach()
+
         val connection = try {
             // NonCancellable: if the user taps Disconnect while the blocking
             // open is in progress, let it finish and close the result below

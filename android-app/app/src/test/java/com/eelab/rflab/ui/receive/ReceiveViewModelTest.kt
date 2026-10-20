@@ -221,7 +221,7 @@ class ReceiveViewModelTest {
             *frames.map { TransportEvent.PacketReceived(it) }.toTypedArray(),
         )
 
-        val viewModel = ReceiveViewModel(events, sendQueue, clock = { 1_000L })
+        val viewModel = ReceiveViewModel.create(events, sendQueue, clock = { 1_000L })
 
         val rows = viewModel.uiState.value.rows
         assertEquals(4, rows.size)
@@ -233,5 +233,66 @@ class ReceiveViewModelTest {
         assertEquals(listOf(5, 5, 5, 4), rows.map { it.repeatCount })
         assertTrue(rows.all { it.serial == 0x0FB58C0CL })
         assertTrue(rows.all { it.button == 0x2 })
+        assertEquals(0, viewModel.uiState.value.decodeErrorCount)
     }
+
+    // --- Malformed transport frames ----------------------------------------
+
+    @Test
+    fun decodeErrorsAreCountedAndDoNotStopLaterFrames() = runTest {
+        val frames = CaptureFixtures.load("r1-btn-1")
+        val events = MutableSharedFlow<TransportEvent>(extraBufferCapacity = 32)
+        val viewModel = ReceiveViewModel.create(events, sendQueue, clock = { nowMs })
+
+        // A burst of corrupt frames, then real traffic. None of the corrupt
+        // events may reach the decoder or stop the stream.
+        events.emit(decodeError())
+        events.emit(decodeError())
+        events.emit(TransportEvent.PacketReceived(frames[0]))
+        events.emit(decodeError())
+        events.emit(TransportEvent.PacketReceived(frames[1]))
+        // A well-formed packet that is simply not an HCS301 frame (too few
+        // pulses) is dropped by the decoder, not counted as a decode error.
+        events.emit(TransportEvent.PacketReceived(shortFrame()))
+        events.emit(TransportEvent.PacketReceived(frames[2]))
+
+        val state = viewModel.uiState.value
+        assertEquals(3, state.decodeErrorCount)
+        assertEquals(1, state.rows.size)
+        assertEquals(3, state.rows.single().repeatCount)
+        assertEquals(0x63FD859DL, state.rows.single().hopping)
+    }
+
+    @Test
+    fun aStreamOfOnlyDecodeErrorsLeavesAnEmptyButResponsiveList() = runTest {
+        val events = MutableSharedFlow<TransportEvent>(extraBufferCapacity = 16)
+        val viewModel = ReceiveViewModel.create(events, sendQueue, clock = { nowMs })
+
+        for (i in 0 until 100) {
+            events.emit(decodeError())
+        }
+
+        assertEquals(0, viewModel.uiState.value.rows.size)
+        assertEquals(100, viewModel.uiState.value.decodeErrorCount)
+    }
+
+    private fun decodeError(): TransportEvent.DecodeError = TransportEvent.DecodeError(
+        failure = com.eelab.rflab.usb.DecodeFailure.FrameTooLong(
+            limitBytes = 1024,
+            actualBytes = 2048,
+        ),
+        wireBody = byteArrayOf(0x01, 0x02, 0x03),
+    )
+
+    private fun shortFrame(): com.eelab.rflab.protocol.FramePacket =
+        com.eelab.rflab.protocol.FramePacket(
+            version = 1,
+            flags = 0,
+            sequence = 99,
+            timestampUs = 0L,
+            droppedFrames = 0,
+            pulses = intArrayOf(4512, 795, 1138),
+            initialLevel = 0,
+            receiverId = 1,
+        )
 }

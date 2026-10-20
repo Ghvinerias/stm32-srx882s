@@ -6,6 +6,7 @@ import com.eelab.rflab.queue.SendItemStatus
 import com.eelab.rflab.queue.SendQueueItem
 import com.eelab.rflab.queue.SendQueueRepository
 import com.eelab.rflab.testing.MainDispatcherRule
+import java.io.IOException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -378,5 +379,68 @@ class SendViewModelTest {
         status.value = false
         assertFalse(viewModel.uiState.value.isConnected)
         assertFalse(viewModel.uiState.value.canSendAll)
+    }
+
+    // --- Link failure during a batch ---------------------------------------
+
+    @Test
+    fun batchSenderFailureLeavesNoItemSendingAndIsReported() {
+        val viewModel = SendViewModel(
+            sendQueue = sendQueue,
+            batchSender = { items, onStatusChange ->
+                onStatusChange(items[0].id, SendItemStatus.SENDING)
+                throw IOException("USB connection is closed")
+            },
+            connectionStatus = flowOf(true),
+        )
+        sendQueue.enqueue(0xA, 1, 1)
+        sendQueue.enqueue(0xB, 2, 2)
+
+        viewModel.sendAll()
+
+        assertEquals(
+            listOf(SendItemStatus.FAILED, SendItemStatus.PENDING),
+            sendQueue.items.value.map { it.status },
+        )
+        val message = viewModel.uiState.value.message!!
+        assertTrue(message.contains("1 link error"))
+        assertTrue(message.contains("1 not sent"))
+    }
+
+    @Test
+    fun abortedBatchSummarisesSentTimedOutAndUnattemptedItems() {
+        val viewModel = SendViewModel(
+            sendQueue = sendQueue,
+            batchSender = { items, onStatusChange ->
+                onStatusChange(items[0].id, SendItemStatus.ACKED_OK)
+                onStatusChange(items[1].id, SendItemStatus.TIMEOUT)
+                onStatusChange(items[2].id, SendItemStatus.FAILED)
+                // items[3] is never attempted: it stays PENDING.
+            },
+            connectionStatus = flowOf(true),
+        )
+        repeat(4) { index -> sendQueue.enqueue(0xAL + index, 1, 1) }
+
+        viewModel.sendAll()
+
+        val message = viewModel.uiState.value.message!!
+        assertTrue(message.contains("Batch stopped"))
+        assertTrue(message.contains("1 ACKed OK"))
+        assertTrue(message.contains("1 timed out"))
+        assertTrue(message.contains("1 link error"))
+        assertTrue(message.contains("1 not sent"))
+    }
+
+    @Test
+    fun scenarioSenderFailureIsReportedWithoutCrashing() {
+        val viewModel = SendViewModel(
+            sendQueue = sendQueue,
+            scenarioSender = { throw IOException("USB device is not connected") },
+            connectionStatus = flowOf(true),
+        )
+
+        viewModel.sendPreset(PresetScenario.RANDOM_HOP)
+
+        assertTrue(viewModel.uiState.value.message!!.contains("USB link failed"))
     }
 }

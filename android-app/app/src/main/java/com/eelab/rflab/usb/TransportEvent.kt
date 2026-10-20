@@ -9,7 +9,8 @@ import com.eelab.rflab.protocol.PacketDecodeResult
  *
  * Decode failures are first-class events rather than being logged and
  * dropped: the device stream is binary and a desynchronised or noisy link
- * must be visible to the UI (and to later sessions' integration checks).
+ * must be visible to the UI. The Receive screen counts them and keeps
+ * decoding; the Connect screen ignores them for liveness purposes.
  */
 sealed interface TransportEvent {
 

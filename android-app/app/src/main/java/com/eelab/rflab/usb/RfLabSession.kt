@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 
 /**
  * The app's current USB connection, if any.
@@ -36,6 +37,19 @@ object RfLabSession {
      */
     val events: Flow<TransportEvent> = _connection.flatMapLatest { current ->
         current?.events ?: emptyFlow()
+    }
+
+    /**
+     * True while a connection is attached *and still healthy*.
+     *
+     * Unlike `connection.map { it != null }` this also changes when the link
+     * dies on its own: [RfLabConnection.openState] flips false as soon as the
+     * read loop sees an I/O error, so the send screen disables itself even
+     * before the Connect screen processes the resulting
+     * [TransportEvent.ConnectionLost] and detaches.
+     */
+    val isConnected: Flow<Boolean> = _connection.flatMapLatest { current ->
+        current?.openState ?: flowOf(false)
     }
 
     /**

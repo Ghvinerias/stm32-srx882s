@@ -52,24 +52,24 @@ import com.eelab.rflab.ui.send.SendUiState
 import com.eelab.rflab.ui.send.SendViewModel
 import com.eelab.rflab.usb.RfLabSession
 import java.util.Locale
-import kotlinx.coroutines.flow.map
 
 /**
  * Send queue and manual-entry screen.
  *
- * Session 7 renders the shared queue, lets the user add/remove/reorder items
+ * The screen renders the shared queue, lets the user add/remove/reorder items
  * and edit each item's frame count, adds the four-field manual-entry card and
  * the six preset scenario buttons.
  *
- * Session 8 connects both send actions to the app's single
- * [BatchSendEngine] (via [SendGraph]): "Send All" walks the queue strictly one
- * item at a time, awaiting each ACK or timeout before writing the next, and
- * preset buttons send a one-shot `SCENARIO_COMMAND` through the same serialised
- * path.
+ * Both send actions go through the app's single [BatchSendEngine] (via
+ * [SendGraph]): "Send All" walks the queue strictly one item at a time,
+ * awaiting each ACK or timeout before writing the next, and preset buttons
+ * send a one-shot `SCENARIO_COMMAND` through the same serialised path.
  *
- * Session 9 gates both send actions on the live USB session. Queue editing
- * still works offline; "Send All" and the preset buttons are disabled and
- * explain why when the Connect tab has no connection.
+ * Both actions are gated on [RfLabSession.isConnected], which follows the
+ * session's live connection state *and* a link that fails on its own (the
+ * read loop's `openState`). Queue editing still works offline; "Send All" and
+ * the preset buttons are disabled and explain why when the Connect tab has no
+ * live connection.
  *
  * @param sendEngine sequential sender supplied by the app composition root.
  */
@@ -81,7 +81,7 @@ fun SendScreen(
         factory = SendViewModel.factory(
             scenarioSender = sendEngine::sendScenario,
             batchSender = sendEngine::sendBatch,
-            connectionStatus = RfLabSession.connection.map { it?.isOpen == true },
+            connectionStatus = RfLabSession.isConnected,
         ),
     ),
 ) {
@@ -508,6 +508,7 @@ private fun StatusBadge(status: SendItemStatus) {
         SendItemStatus.ACKED_OK -> "Acked OK"
         SendItemStatus.ACKED_FAILED -> "Acked failed"
         SendItemStatus.TIMEOUT -> "Timeout"
+        SendItemStatus.FAILED -> "Link failed"
     }
     val (container, content) = when (status) {
         SendItemStatus.PENDING ->
@@ -523,6 +524,7 @@ private fun StatusBadge(status: SendItemStatus) {
 
         SendItemStatus.ACKED_FAILED,
         SendItemStatus.TIMEOUT,
+        SendItemStatus.FAILED,
         -> MaterialTheme.colorScheme.errorContainer to
             MaterialTheme.colorScheme.onErrorContainer
     }

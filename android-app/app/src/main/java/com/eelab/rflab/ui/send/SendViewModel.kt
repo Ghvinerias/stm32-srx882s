@@ -11,6 +11,7 @@ import com.eelab.rflab.protocol.TxCommand
 import com.eelab.rflab.queue.SendItemStatus
 import com.eelab.rflab.queue.SendQueueItem
 import com.eelab.rflab.queue.SendQueueRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -25,16 +26,19 @@ private const val TAG = "SendViewModel"
 /**
  * State and actions for the send queue screen.
  *
- * Session 7 owns queue management (add, remove, reorder, frame-count editing),
- * manual hopping/serial/button/frames entry and the six preset scenario
- * buttons. Session 8 wires the two network-facing actions to the real
- * sequential send engine:
+ * Owns queue management (add, remove, reorder, frame-count editing), manual
+ * hopping/serial/button/frames entry and the six preset scenario buttons, and
+ * drives the real sequential send engine through two injected senders:
  *
  * - [scenarioSender] sends one validated [ScenarioCommand] and returns its
  *   terminal status (one-shot `SCENARIO_COMMAND`, waits for `for_type = 4`).
  * - [batchSender] drains the queue strictly one item at a time, reporting
  *   per-item status through the callback (which updates the shared queue), and
  *   waits for each item's ACK or timeout before writing the next.
+ *
+ * Both senders map a dead USB link to [SendItemStatus.FAILED]; a batch that
+ * stops because of one leaves the unattempted items [SendItemStatus.PENDING]
+ * and the summary below says how many were not sent.
  *
  * The production wiring lives in [com.eelab.rflab.send.SendGraph] and
  * [com.eelab.rflab.ui.RfLabApp]. Defaults stay inert so the screen can be
@@ -203,7 +207,14 @@ class SendViewModel(
         val command = ScenarioCommand(preset.commandChar)
         viewModelScope.launch {
             _uiState.update { it.copy(message = "Sending scenario '${preset.commandChar}'…") }
-            val status = scenarioSender(command)
+            val status = try {
+                scenarioSender(command)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                Log.w(TAG, "Scenario send failed", error)
+                SendItemStatus.FAILED
+            }
             _uiState.update {
                 it.copy(message = "Scenario '${preset.commandChar}': ${status.label()}")
             }
@@ -217,6 +228,11 @@ class SendViewModel(
      * each item's status. Status updates go into the shared repository, so the
      * queue collector in [init] repaints the badges as the batch progresses.
      * A second press while a batch is active is ignored.
+     *
+     * If the batch throws (which the engine avoids, but this is the UI's
+     * backstop) any item still marked [SendItemStatus.SENDING] becomes
+     * [SendItemStatus.FAILED] and the summary still runs, so a badge can never
+     * be left spinning.
      */
     fun sendAll() {
         val snapshot = sendQueue.items.value
@@ -235,21 +251,41 @@ class SendViewModel(
                 it.copy(message = "Sending ${snapshot.size} item(s) sequentially…")
             }
 
-            batchSender(snapshot) { itemId, status ->
-                // The callback is also how SENDING reaches the UI before each
-                // write, so the badges track the strict one-at-a-time order.
-                sendQueue.setStatus(itemId, status)
+            try {
+                batchSender(snapshot) { itemId, status ->
+                    // The callback is also how SENDING reaches the UI before
+                    // each write, so the badges track the strict one-at-a-time
+                    // order.
+                    sendQueue.setStatus(itemId, status)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                Log.w(TAG, "Batch send failed", error)
+                // The engine normally reports a terminal status for the item
+                // it was on; this covers a sender that threw instead.
+                sendQueue.items.value
+                    .filter { it.status == SendItemStatus.SENDING }
+                    .forEach { sendQueue.setStatus(it.id, SendItemStatus.FAILED) }
+            } finally {
+                publishQueue()
             }
-            publishQueue()
 
             val sentIds = snapshot.mapTo(HashSet()) { it.id }
             val finalItems = sendQueue.items.value.filter { it.id in sentIds }
             val ok = finalItems.count { it.status == SendItemStatus.ACKED_OK }
             val failed = finalItems.count { it.status == SendItemStatus.ACKED_FAILED }
             val timedOut = finalItems.count { it.status == SendItemStatus.TIMEOUT }
+            val linkLost = finalItems.count { it.status == SendItemStatus.FAILED }
+            val notSent = finalItems.count { it.status == SendItemStatus.PENDING }
             _uiState.update {
                 it.copy(
-                    message = "Batch done: $ok ACKed OK, $failed failed, $timedOut timed out",
+                    message = if (linkLost > 0 || notSent > 0) {
+                        "Batch stopped: $ok ACKed OK, $failed failed, $timedOut timed out, " +
+                            "$linkLost link error(s), $notSent not sent"
+                    } else {
+                        "Batch done: $ok ACKed OK, $failed failed, $timedOut timed out"
+                    },
                 )
             }
         }
@@ -377,4 +413,5 @@ private fun SendItemStatus.label(): String = when (this) {
     SendItemStatus.ACKED_OK -> "ACKed OK"
     SendItemStatus.ACKED_FAILED -> "ACKed failed"
     SendItemStatus.TIMEOUT -> "Timeout"
+    SendItemStatus.FAILED -> "USB link failed"
 }

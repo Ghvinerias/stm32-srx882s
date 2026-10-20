@@ -1,226 +1,186 @@
-# STM32 RF Lab — Android app (WIP)
+# STM32 RF Lab — Android controller
 
-**Status: protocol primitives, raw packet layer, USB transport, HCS301
-decoder, live receive screen, send queue, sequential batch-send engine and the
-real Connect screen/lifecycle wiring are in place** (session 9 of the
-10-session plan in [`PLAN.md`](PLAN.md)); the authoritative protocol and
-decode details live in [`AGENT_BRIEF.md`](AGENT_BRIEF.md).
+An Android app that talks to the STM32 RF lab board (`firmware/`) over a
+USB CDC-ACM serial link: it **receives** HCS301-shaped frames, decodes the
+clear-text fields locally, and **replays** them (or manually entered
+commands, or the firmware's preset scenarios) back through the board's
+transmitter.
 
-The **Connect** tab finds the board (VID `0xCAFE` / PID `0x4001`), requests
-USB permission through the Android permission dialog, opens the CDC-ACM port
-and attaches it to the shared session. It then shows a STATUS-heartbeat
-indicator (fresh/stale, 3 s threshold) and the optional clock/edge
-diagnostics. The **Receive** tab decodes FRAME packets from that same
-connection, collapses press repeats into rows and can copy selected rows to a
-shared send queue. The **Send** tab manages that queue, supports manual entry
-and the six preset scenarios, and sends strictly one command at a time:
-each item is written, then the next ACK (or a 2 s timeout) must resolve
-before the next item starts. Sending is disabled while disconnected; queue
-editing still works offline.
+The wire protocol and decode algorithm are specified in
+[`AGENT_BRIEF.md`](AGENT_BRIEF.md); the ten-session build plan is in
+[`PLAN.md`](PLAN.md). Both are the authority for protocol details — this
+README explains the shipped app.
 
-## What exists
+## Scope boundary
 
-- Standard Gradle / Android Studio project, Kotlin, single `app` module.
-- Jetpack Compose + Material 3 with a `NavigationBar`/`NavHost` shell.
-- `com.eelab.rflab.protocol.Cobs` and `Crc16`: JVM-testable Kotlin ports of
-  `transport_cobs_encode` / `transport_cobs_decode` and `transport_crc16`
-  from `firmware/src/transport.c`, with unit tests under `app/src/test/`.
-  The COBS codec handles bodies only; the trailing `0x00` wire delimiter is
-  handled by the transport layer.
-- `com.eelab.rflab.protocol.PacketCodec` plus the packet types in
-  `Packets.kt` (`FramePacket`, `StatusPacket`, `TxCommand`,
-  `ScenarioCommand`, `AckPacket`): decoding for all five packet types with
-  typed CRC/truncation/unknown-type failures, and encoders for `TX_COMMAND`
-  and `SCENARIO_COMMAND`. This layer consumes/produces the raw bytes *after*
-  COBS decoding (CRC included, delimiter excluded).
-- `com.eelab.rflab.usb` (session 4), the transport layer:
-  - `UsbDeviceFinder` matches VID `0xCAFE` / PID `0x4001` in
-    `UsbManager.deviceList` and constructs `CdcAcmSerialDriver` directly
-    (the pair is not in the library's default prober table).
-  - `UsbPermission.requestPermission(...)` wraps `requestPermission()` plus
-    the result `BroadcastReceiver` as a suspend function returning
-    granted/denied (15 s default timeout, receiver always unregistered).
-  - `PacketReassembler` buffers raw bulk-read bytes, splits on the `0x00`
-    delimiter, and runs each body through `Cobs.decode` then
-    `PacketCodec.decode`. It is plain Kotlin and fully JVM-tested, including
-    arbitrary chunk boundaries, multiple packets per chunk, CRC/COBS
-    failures, empty frames, and size-capped recovery from noise.
-  - `RfLabConnection.open(...)` claims the port, sets 115200 8N1 (required by
-    the API, irrelevant to the native USB link), runs a background read
-    coroutine for the connection's lifetime, and exposes `events`
-    (`SharedFlow<TransportEvent>`), `write(bytes)`, `sendPacket(rawPacket)`
-    (COBS + delimiter) and `close()`.
-- `com.eelab.rflab.decode` (session 5), the HCS301-shaped signal decoder:
-  - `Hcs301Timing.kt` holds the measured constants from the brief
-    (`PREAMBLE_EDGES = 11`, `HEADER_ZERO_US = 4512`,
-    `HEADER_ONE_US = 4170`, `SHORT_US = 795`, `MID_US = 1138`,
-    `LONG_US = 1482`, `TOLERANCE = 0.10`) and the 77-pulse frame length.
-  - `ScaleEstimator` is an incremental port of `estimate_scale()` from
-    `tools/decode_hcs301.py`: pool every data cell (`pulses[12..]`) across
-    frames, take the median, divide by `MID_US`; below 8 samples or outside
-    `[0.85, 1.15]` it returns 1.0.
-  - `Hcs301Decoder.decodeFrame(pulses, scale)` rejects wrong-length frames,
-    out-of-tolerance headers/data cells and invalid 0->1 / 1->0 transitions,
-    then extracts the 32-bit hopping word, 28-bit serial, 4-bit button, VLOW
-    and repeat LSB-first. `DecodedSignal` carries those fields plus the
-    source `FramePacket` timestamp/sequence and the scale used.
-- `com.github.mik3y:usb-serial-for-android:3.11.0` dependency.
-- `com.eelab.rflab.ui.receive` and the live `ReceiveScreen` (session 6):
-  - `ReceiveViewModel` subscribes to a `Flow<TransportEvent>`, keeps one
-    running `ScaleEstimator` for the ViewModel (adding every frame's
-    pulses before decoding, including malformed ones), and runs
-    `Hcs301Decoder.decodeFrame` at the current scale. Rejected frames and
-    non-FRAME packets are dropped.
-  - `ReceivedSignalAccumulator` collapses decodes with the same
-    hopping+serial+button that arrive within **500 ms** of the previous
-    decode into one row (`repeatCount`, first-seen timestamp retained).
-    Grouping uses host arrival time from an injected clock, not the device's
-    32-bit microsecond timestamp (which wraps every ~71 min).
-  - Rows are newest first; tapping a row or its checkbox toggles selection,
-    and "Add N to send queue" copies every selected row into
-    `SendQueueRepository.shared` as `SendQueueItem(id, hopping, serial,
-    button)` and clears the selection. The header shows the current queue
-    size.
-  - The screen is split into a stateful wrapper plus a stateless body, so
-    the row/selection/queue UI has no ViewModel or USB dependency.
-- `com.eelab.rflab.queue.SendQueueRepository` (session 7): process-wide
-  `StateFlow<List<SendQueueItem>>` with add/remove/reorder/frame-count edit
-  and `setStatus`. Items carry `PENDING`/`SENDING`/`ACKED_OK`/
-  `ACKED_FAILED`/`TIMEOUT`.
-- `com.eelab.rflab.send.BatchSendEngine` (session 8): the strict
-  sequential send-then-await-ACK engine required by the brief's timing
-  constraint.
-  - `sendBatch(items, onStatusChange)` marks one item `SENDING`, writes
-    its encoded `TX_COMMAND`, waits for the next `for_type = 3` ACK or a
-    configurable timeout (2 s in production), reports the terminal
-    status, and only then starts the next item. It never pipelines.
-  - `sendScenario(cmd)` is the one-shot `SCENARIO_COMMAND` path, waiting
-    for `for_type = 4`.
-  - Both share one mutex, so a preset press cannot overlap a batch.
-  - Each wait subscribes to the shared event stream before writing with
-    `CoroutineStart.UNDISPATCHED`, ignores FRAME/STATUS/decode errors and
-    ACKs for the other command type, and cancels its collector on
-    resolution. Other collectors (the receive screen) are unaffected.
-  - A failed write aborts the remaining batch items (left `PENDING`) and
-    reports the failed item as `TIMEOUT`; a normal timeout continues with
-    the next item, per the brief.
-  - `SendGraph` is the composition root: it binds the engine to
-    `RfLabSession.events` and the current connection's `sendPacket`, and
-    `RfLabApp` passes the single instance to `SendScreen`/`SendViewModel`.
-  - JVM tests use a `MutableSharedFlow` fake event source and a captured
-    write function to cover prompt ACK, `accepted = 0`, timeout,
-    unrelated traffic, strict 3-item ordering, and the scenario path.
-- `com.eelab.rflab.usb.ConnectPort` / `UsbConnectController` (session 9):
-  the connection-lifecycle seam. `ConnectPort` is the small JVM-testable
-  interface (`connect()`, `disconnect()`, `isConnected()`, `events`);
-  `UsbConnectController` is the production implementation that enumerates
-  `UsbManager.deviceList`, asks `UsbPermission` for access, opens
-  `RfLabConnection` and calls `RfLabSession.attach(...)`. It holds only the
-  **application Context** — USB permission is delivered through a
-  `PendingIntent` broadcast, so no Activity is needed. The permission wait is
-  a coroutine suspension and the blocking port open runs off the main
-  thread; an open that finishes after the user cancelled is closed instead of
-  attached.
-- `com.eelab.rflab.ui.connect` (session 9), the Connect screen state:
-  - `ConnectViewModel` exposes `Disconnected` / `Connecting` /
-    `PermissionDenied` / `Connected` / `Error(message)` and drives
-    connect/disconnect through `ConnectPort`. A `ConnectionLost` transport
-    event moves to `Error` and detaches the dead link. Leaving the tab does
-    not disconnect; re-creating the ViewModel while attached starts as
-    `Connected`.
-  - `StatusHeartbeat` is a pure, clock-injected liveness tracker: `WAITING`
-    until the first STATUS, `LIVE` while one has arrived within **3 s**,
-    `STALE` after 3 s without one (including before the first STATUS, using
-    the connection time as the reference). The ViewModel re-checks it every
-    **500 ms**, so a silent link goes stale with no packets arriving.
-  - STATUS's `clock_hz`, `total_edges`, `dropped_packets` and sequence are
-    reassembled for the optional diagnostics card.
-  - `ConnectScreen` replaces the stub: colored state dot, phase and
-    heartbeat text, connect/disconnect (and cancel-while-connecting)
-    buttons, and the diagnostics readout once STATUS arrives.
-- Session 9 send gating: `SendViewModel` also observes
-  `RfLabSession.connection`, so "Send All" and the preset buttons are
-  disabled and refuse to run with a clear message while disconnected.
-  `canSendAll` requires both a non-empty queue and a live link. Receive
-  needs no change: with nothing attached, `RfLabSession.events` is empty and
-  the screen keeps its existing "No signals yet" state.
-- `UsbPermission` now scopes its mutable `PendingIntent` action to the app's
-  package. Android 14+ rejects implicit mutable `PendingIntent`s, which
-  would otherwise make the permission request crash before the dialog.
-- `com.eelab.rflab.usb.RfLabSession`: the app-wide current
-  `RfLabConnection`. The Connect path attaches after a successful open and
-  detaches on disconnect (or connection loss); `events` switches to/from an
-  empty stream with it.
-- Dependencies added for the ViewModel/Compose wiring:
-  `lifecycle-runtime-compose`, `lifecycle-viewmodel-ktx`,
-  `lifecycle-viewmodel-compose`, and `kotlinx-coroutines-test` for JVM tests.
-- USB host feature declared, plus `res/xml/device_filter.xml` matching the lab
-  board (VID `0xCAFE` / PID `0x4001`, decimal `51966` / `16385`) and an
-  `USB_DEVICE_ATTACHED` intent filter.
-- `minSdk 23`, `targetSdk 35`, `compileSdk 35`.
+This app reconstructs and replays **only the clear-text fields** of an
+HCS301-shaped frame: the 32-bit hopping word *as transmitted* (still
+ciphertext — the app never decrypts it), the 28-bit serial, the 4-bit
+button, VLOW and repeat. It performs no decryption, key derivation, or
+brute-forcing. "Receive, display, select, replay exactly" is the whole
+feature set — the same boundary as `tools/decode_hcs301.py`,
+`firmware/src/lab_tx.c`, and the ESP32 sketch in `esp32-bt-console/`.
 
-## Build
+Sending always uses the binary packet protocol. The firmware's ASCII
+text-command mode is not used by this app.
 
-Requires JDK 17+ and Android SDK platform 35 (build-tools 35.0.0). Open the
-`android-app/` directory in Android Studio, or:
+## Architecture
 
-```sh
-./gradlew test          # JVM unit tests, no device required
-./gradlew assembleDebug
+Kotlin, Jetpack Compose + Material 3, single `app` module, `minSdk 23`,
+`targetSdk`/`compileSdk` 35. No DI framework: the app has one connection,
+one queue and one sender, wired explicitly in the composition roots
+([`ui/RfLabApp.kt`](app/src/main/java/com/eelab/rflab/ui/RfLabApp.kt) and
+[`send/SendGraph.kt`](app/src/main/java/com/eelab/rflab/send/SendGraph.kt)).
+
+```
+USB device
+   │  bulk IN (COBS body + 0x00 delimiter)
+   ▼
+usb.RfLabConnection ──► usb.PacketReassembler ──► protocol.PacketCodec ──► TransportEvent
+   (port + read loop)     (split/delim/COBS)        (CRC + layout)          │
+                                                                           ├─► ui.connect.ConnectViewModel
+                                                                           │     (STATUS heartbeat, diagnostics)
+                                                                           ├─► ui.receive.ReceiveViewModel
+                                                                           │     (ScaleEstimator → Hcs301Decoder
+                                                                           │      → ReceivedSignalAccumulator)
+                                                                           └─► send.BatchSendEngine (ACK waits)
+                                                                                 ▲
+                                          host → device: TX_COMMAND / SCENARIO_COMMAND
+                                          (COBS + 0x00, one command in flight at a time)
 ```
 
-The debug APK lands in `app/build/outputs/apk/debug/`.
+| Package | Responsibility |
+|---|---|
+| `protocol` | `Cobs` (port of `transport_cobs_encode/decode`), `Crc16` (CRC-16/CCITT-FALSE), `PacketCodec` and the packet types (`FramePacket`, `StatusPacket`, `TxCommand`, `ScenarioCommand`, `AckPacket`). Works on raw bytes after COBS decoding; the trailing `0x00` delimiter is the transport's job. |
+| `usb` | `UsbDeviceFinder` (VID `0xCAFE` / PID `0x4001`, direct `CdcAcmSerialDriver` — the pair is deliberately absent from usb-serial-for-android's prober table), `UsbPermission` (suspend permission request with a 15 s timeout), `PacketReassembler` (arbitrary chunk boundaries, resynchronises after corrupt frames), `RfLabConnection` (port + background read loop + writes), `RfLabSession` (the app-wide current connection), `ConnectPort` / `UsbConnectController` (connection-lifecycle seam). |
+| `decode` | `Hcs301Decoder` and `ScaleEstimator`, exact Kotlin ports of `tools/decode_hcs301.py`, plus the measured timing constants. |
+| `queue` | `SendQueueRepository` — the process-wide `StateFlow<List<SendQueueItem>>`, ids, reorder, frame-count clamp, per-item status. |
+| `send` | `BatchSendEngine` — strict sequential send-then-await-ACK; `SendGraph` — the app's single engine instance. |
+| `ui/connect` | `ConnectViewModel`, `ConnectUiState`, `StatusHeartbeat` (3 s stale threshold, 500 ms poll). |
+| `ui/receive` | `ReceiveViewModel` (transport events → decoded signals), `ReceivedSignalAccumulator` (collapses press repeats within 500 ms on host arrival time), row/format types. |
+| `ui/send` | `SendViewModel` (queue editing, manual hex entry validation, preset scenarios, batch summary), UI state types. |
+| `ui/screens` | Compose screens: a stateful wrapper plus a stateless body, so layouts can be previewed and tested without USB or a ViewModel. |
+| `ui` | `RfLabApp` composition root: bottom-nav shell, one `UsbConnectController`, one `BatchSendEngine`, and one activity-scoped `ReceiveViewModel` that decodes from process start. |
 
-## Notes for later sessions
+## Build and test
 
-- Session 7 reads `SendQueueRepository.shared.items` and can render/reorder/
-  remove from it. The repository assigns ids and allows duplicates on
-  purpose; the receive screen only appends.
-- The Connect path is the only place that should call
-  `RfLabSession.attach(...)` / `detach()`. `UsbConnectController` attaches
-  after a successful `RfLabConnection.open(...)`; the Receive and Send
-  screens observe the session, so they need no reconnect logic of their own.
-- USB permission and the blocking port open do not need an Activity: the
-  permission answer arrives by broadcast to the application context, and the
-  screen only calls the ViewModel. If a future change adds an
-  `ActivityResult`-based flow, keep it above `ConnectPort` rather than
-  leaking an Activity into the ViewModel.
-- Liveness is heartbeat-based, not connection-based: `ConnectUiState` can be
-  `Connected` + `STALE` when the port is open but STATUS stops. The 3 s
-  threshold and 500 ms poll live in `StatusHeartbeat` /
-  `ConnectViewModel.LIVENESS_TICK_MS`.
-- The receive screen keeps one `ScaleEstimator` for the ViewModel's
-  lifetime, matching the brief's per-connection-session scale. Session 10 can
-  start a fresh receive ViewModel when opening a new connection if it wants
-  calibration restarted for a different transmitter; reusing the pooled
-  estimate still decodes, it just mixes both transmitters' data cells.
-- `RfLabConnection.events` has no replay: subscribe before connecting if
-  every packet matters. The buffer applies backpressure rather than dropping
-  packets under a slow collector. The Connect screen's heartbeat starts
-  before the next STATUS (up to 1 s later), so the first ~1 s shows
-  `WAITING`, which is expected.
-- The USB-dependent parts (`UsbManager`, `CdcAcmSerialDriver`, the permission
-  dialog) need a real device or instrumentation. `ConnectPort` is the seam
-  used to JVM-test the whole connect state machine, permission-denial/error
-  paths and heartbeat staleness with a fake; stream/framing logic remains in
-  `PacketReassembler` and is unit-tested separately.
-- Sending stays strictly sequential: one command, wait for its ACK or a
-  timeout, then the next. Any change to `BatchSendEngine` must preserve that
-  and the single shared instance from `SendGraph`; the ACK protocol has no
-  request id, so pipelining makes ACK attribution ambiguous. Session 10
-  should decide how much of a mid-batch disconnect to surface beyond the
-  current "abort remaining items, mark the failed write as timeout" rule.
-  The UI already disables sends once the session detaches; a disconnect in
-  the middle of an in-flight batch still ends that item as a timeout.
-- Feed every received `FramePacket.pulses` to `ScaleEstimator.addFrame(...)`
-  before decoding (even malformed-length frames: the reference pools their
-  data cells too). Decode each frame with the estimator's current `scale`.
-  The first frame before any calibration uses 1.0; for a transmitter running
-  a few percent off, its header can land exactly between the two header
-  centres, where the reference's `<=` tie-break picks the wrong leading bit
-  and rejects the frame. That is expected parity with the Python tool, not a
-  decoder bug — calibration applies from the next frame onward.
-- The decoder's unit tests are anchored to three real captures copied into
-  `app/src/test/resources/fixtures/` (`r1-btn-1`, `r3-test`,
-  `r3-new-test`), with expected values generated by
-  `tools/decode_hcs301.py`. Session 10 can extend this fixture set.
+Requirements: JDK 17+ (JDK 21 works), Android SDK platform 35 and
+build-tools 35.0.0. Point `local.properties` at your SDK, or open the
+`android-app/` directory in Android Studio.
+
+```sh
+./gradlew test           # JVM unit tests — no device, no emulator
+./gradlew assembleDebug  # debug APK in app/build/outputs/apk/debug/
+./gradlew lintDebug      # Android lint
+./gradlew clean test assembleDebug
+```
+
+The tests run on the JVM only: the USB APIs are behind `ConnectPort` /
+injected lambdas. Everything with real logic is plain Kotlin and covered —
+COBS/CRC vectors, packet layouts and failure modes, reassembly across
+arbitrary chunk boundaries, the decoder against real captures, repeat
+grouping, the send state machine (fake event flow), and the connect state
+machine (fake port).
+
+## Hardware
+
+- STM32 "Blue Pill" RF lab board running the firmware in `firmware/`,
+  enumerated as a **CDC-ACM** device with VID `0xCAFE`, PID `0x4001`
+  (strings "EE Lab" / "Blue Pill RF Lab").
+- An Android phone/tablet with **USB host (OTG)** support (`android.hardware.usb.host`).
+  A USB-C OTG adapter is normally required.
+- The VID/PID is vendor-specific, so the app matches it explicitly and does
+  **not** use `UsbSerialProber`'s default table.
+- Baud rate is irrelevant (native USB CDC-ACM, no UART underneath); the app
+  sets 115200 8N1 only because the API requires it.
+- The device's USB receive ring is 256 bytes, which is why commands are sent
+  strictly one at a time (see `BatchSendEngine`).
+
+## Usage walkthrough
+
+1. **Connect** — plug the board in over OTG, open the Connect tab and tap
+   *Connect*. Android shows its USB permission dialog the first time;
+   a denial or a 15 s timeout lands on a retryable "USB permission denied"
+   state. Once connected, the dot turns green when the first STATUS arrives
+   (the board sends one per second) and the card shows clock, edge and drop
+   diagnostics. "Connected but stale" after 3 s of silence means the link is
+   open but the board is not sending.
+2. **Receive** — press a remote near the receiver. Each decoded frame
+   appears as a row with host timestamp, button nibble, hopping word and
+   serial; repeats of one press collapse into a single row with a `×N`
+   badge. Tap rows (or their checkboxes) and press *Add N to send queue*.
+   Malformed frames are counted in the header ("N malformed frames ignored")
+   and otherwise ignored.
+3. **Send** — the queue lists what you added. Reorder, remove, and set each
+   item's frame count (1–10). You can also add a manual command (hex
+   hopping/serial/button, decimal frames) and fire any of the six preset
+   scenarios (`r s z p x d`). *Send All* walks the queue strictly one item at
+   a time: write → wait for that item's ACK (2 s timeout) → next. Each item
+   shows Pending / Sending / Acked OK / Acked failed / Timeout / Link failed.
+4. **Disconnect** on the Connect tab closes the port. Leaving the tab does
+   not disconnect, and the Receive list keeps decoding in the background.
+
+## Error handling
+
+- **Malformed/corrupt frames** become `TransportEvent.DecodeError` events
+  (bad COBS, bad CRC, truncated/foreign packet, oversized frame). The
+  reassembler resynchronises at the next delimiter; the Receive screen counts
+  them but never feeds them to the decoder, so a noisy link cannot crash or
+  wedge the list.
+- **Device unplugged / link lost** makes the read loop emit
+  `ConnectionLost`, flips `RfLabConnection.openState` false, and detaches the
+  session. The Connect screen shows `Error("Connection lost: …")`, the Send
+  screen disables itself immediately, and a batch in flight stops at once.
+- **Disconnect mid-batch**: the in-flight item becomes `FAILED` (not
+  `TIMEOUT` — nothing is known about whether it was transmitted), the
+  remaining items stay `PENDING` (never attempted), and the summary reports
+  the counts. Cancelling the screen mid-batch also leaves no item stuck on
+  `Sending`.
+- **ACK timeout** (link still up, one command lost) marks that item
+  `TIMEOUT` and continues with the next, per the brief.
+- **USB permission denial** is a distinct, retryable phase with its own
+  message; it never leaves the UI spinning in "Connecting".
+
+## Tests and real-capture fixtures
+
+`app/src/test/resources/fixtures/` holds byte-for-byte copies of NDJSON
+captures from `tools/captures/`. `RealCaptureDecodeTest` estimates the scale
+exactly as `tools/decode_hcs301.py` does and asserts every frame's
+hopping/serial/button/VLOW/repeat against that reference's output:
+
+| Fixture | Frames | Scale | Notes |
+|---|---|---|---|
+| `r1-btn-1` | 19 | 0.9991 | nominal-speed transmitter |
+| `r3-test` | 52 | 1.0404 | ~4 % slow transmitter (calibration case) |
+| `r3-new-test` | 20 | 1.0404 | same transmitter, later press |
+| `hold-btn1` | 18 | 1.0404 | held button across nibbles 0x2/0x4/0x8 |
+| `r3-usb-sanity` | 34 | 1.0404 | captured through the real USB link |
+
+`ReceivePipelineTest` takes `r3-usb-sanity`, re-encodes each frame exactly as
+the firmware transport would (header + CRCs + COBS + `0x00`), feeds the byte
+stream through `PacketReassembler` in deliberately awkward chunks, and asserts
+the Receive screen ends up with the nine expected grouped rows — an
+end-to-end check of sessions 2–6 on real data.
+
+Regenerate expected values with:
+
+```sh
+python3 tools/decode_hcs301.py tools/captures/<name>.ndjson
+```
+
+## Known limitations / what still needs a real device
+
+- Opening the port, the Android permission dialog, and the actual CDC-ACM
+  read/write path are only exercised on hardware; the JVM tests stop at the
+  `ConnectPort` and write-lambda seams. A manual QA pass should confirm the
+  permission dialog/denial, hot-unplug during a batch, and a real
+  board round-trip (captured ACKs, no lost frames).
+- The receive `ScaleEstimator` is reset when the link is lost, but a
+  deliberate disconnect followed by connecting a *different* transmitter
+  keeps the pooled data cells from the previous one. The estimate is a
+  median with a ±10 % tolerance, so in practice both still decode; a fully
+  clean design would key the estimator to the connection instance.
+- The queue is in memory only; it does not survive process death.
+- The app does not surface the firmware's `flags` bitfield (truncated
+  capture, DMA overrun, clock fallback) in the UI; the fields are decoded and
+  available on `FramePacket`/`StatusPacket`.

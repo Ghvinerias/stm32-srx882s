@@ -10,11 +10,11 @@ import kotlinx.coroutines.flow.update
 /**
  * Per-item state of a queued transmit request.
  *
- * Session 7 only creates items in [PENDING] and renders the badge; session 8's
- * sequential send engine owns every transition from there.
+ * New items start in [PENDING]; the sequential send engine owns every
+ * transition from there.
  */
 enum class SendItemStatus {
-    /** Queued, not sent yet. */
+    /** Queued, not sent yet (also: still queued after a batch aborted). */
     PENDING,
 
     /** Currently on the wire, waiting for its ACK. */
@@ -28,6 +28,13 @@ enum class SendItemStatus {
 
     /** No ACK arrived before the batch engine's timeout. */
     TIMEOUT,
+
+    /**
+     * The USB link failed (device unplugged/reset) before or while this item
+     * could be confirmed. Distinct from [TIMEOUT]: the command may never have
+     * reached the board, and nothing is known about whether it was executed.
+     */
+    FAILED,
 }
 
 /**
@@ -40,7 +47,7 @@ enum class SendItemStatus {
  * @property frameCount number of frames to transmit, `1..10`. Editable from
  *   the send screen; [SendQueueRepository.setFrameCount] applies the clamp.
  * @property status batch-send progress. Starts [SendItemStatus.PENDING] and is
- *   only changed by session 8's send engine.
+ *   only changed by the batch send engine.
  */
 data class SendQueueItem(
     val id: Long,
@@ -60,7 +67,7 @@ data class SendQueueItem(
         }
     }
 
-    /** Converts this queue item into the protocol command session 8 will send. */
+    /** Converts this queue item into the protocol command the send engine sends. */
     fun toTxCommand(): TxCommand = TxCommand(
         hopping = hopping,
         serial = serial,
@@ -82,8 +89,8 @@ data class SendQueueItem(
 }
 
 /**
- * Shared send queue, filled from the receive screen and managed by the send
- * screen (session 7), then drained by the batch engine (session 8).
+ * Shared send queue, filled from the receive screen, managed by the send
+ * screen, then drained by the batch engine.
  *
  * Deliberately a plain in-memory, process-scoped object rather than a DI
  * framework: this app has a single queue for the lifetime of the process.
@@ -175,8 +182,8 @@ class SendQueueRepository {
     /**
      * Sets the batch-send [status] on the item with [id].
      *
-     * Session 8 seam: the send engine calls this before/after each item and
-     * on timeout. Session 7 only ever leaves items [SendItemStatus.PENDING].
+     * Called by the send engine before/after each item, on timeout and when
+     * the link fails mid-batch.
      *
      * @return true if the item exists.
      */

@@ -15,8 +15,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -36,7 +39,7 @@ import kotlinx.coroutines.withContext
  * everything that can be tested without a device lives in
  * [PacketReassembler], [com.eelab.rflab.protocol.Cobs] and
  * [com.eelab.rflab.protocol.PacketCodec]. Opening, claiming, and reading
- * require a real USB host and are not unit-tested (see the session 4 notes
+ * require a real USB host and are not unit-tested (see the hardware section
  * in `README.md`).
  *
  * @see UsbDeviceFinder for locating the board.
@@ -52,8 +55,18 @@ class RfLabConnection private constructor(
     /** Serialises writes: USB transfers must not overlap between coroutines. */
     private val writeMutex = Mutex()
 
-    /** False once the link has failed or [close] has started. */
-    private val open = AtomicBoolean(true)
+    /**
+     * False once the link has failed or [close] has started.
+     *
+     * A [StateFlow] rather than a plain flag so screens can observe a link
+     * that dies on its own: the read loop flips this on an I/O failure, which
+     * lets the Send screen disable itself and the batch engine reject writes
+     * immediately instead of waiting for a full ACK timeout per item.
+     */
+    private val _open = MutableStateFlow(true)
+
+    /** Observable form of [isOpen]; see [_open]. */
+    val openState: StateFlow<Boolean> = _open.asStateFlow()
 
     /** Set once shutdown has run, so [close] and the read loop agree on who cleans up. */
     private val closed = AtomicBoolean(false)
@@ -75,7 +88,7 @@ class RfLabConnection private constructor(
 
     /** True while the port is open and the reader has not failed. */
     val isOpen: Boolean
-        get() = open.get() && !closed.get()
+        get() = _open.value && !closed.get()
 
     init {
         scope.launch { readLoop() }
@@ -121,7 +134,7 @@ class RfLabConnection private constructor(
      */
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        open.set(false)
+        _open.value = false
         scope.cancel()
         runCatching { port.close() }
     }
@@ -141,14 +154,14 @@ class RfLabConnection private constructor(
         val buffer = ByteArray(READ_BUFFER_BYTES)
 
         try {
-            while (open.get() && currentCoroutineContext().isActive) {
+            while (_open.value && currentCoroutineContext().isActive) {
                 val bytesRead = try {
                     port.read(buffer, READ_TIMEOUT_MS)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
                     if (!closed.get()) {
-                        open.set(false)
+                        _open.value = false
                         _events.emit(TransportEvent.ConnectionLost(e))
                     }
                     return
@@ -161,7 +174,7 @@ class RfLabConnection private constructor(
                 }
             }
         } finally {
-            open.set(false)
+            _open.value = false
             if (closed.compareAndSet(false, true)) {
                 runCatching { port.close() }
             }

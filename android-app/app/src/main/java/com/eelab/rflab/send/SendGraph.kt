@@ -13,9 +13,10 @@ import java.io.IOException
  *
  * The event source is [RfLabSession.events], which switches with the
  * connection, and the write lambda resolves the *current* connection at send
- * time. Session 9 owns attaching a real connection to the session; until
- * then every write fails fast with an [IOException] and the engine reports
- * the item as timed out rather than crashing the UI.
+ * time. With no connection attached — or one whose read loop has already
+ * failed — every write fails fast with an [IOException], so the engine
+ * reports the item as [com.eelab.rflab.queue.SendItemStatus.FAILED] instead of
+ * crashing the UI or burning an ACK timeout.
  */
 object SendGraph {
 
@@ -26,6 +27,9 @@ object SendGraph {
             sendPacket = { rawPacket ->
                 val connection = RfLabSession.connection.value
                     ?: throw IOException("USB device is not connected")
+                if (!connection.isOpen) {
+                    throw IOException("USB connection is closed")
+                }
                 // COBS encoding plus the trailing 0x00 delimiter.
                 connection.sendPacket(rawPacket)
             },

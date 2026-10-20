@@ -210,7 +210,8 @@ class ConnectViewModel(
             }
 
             // Malformed frames are not a heartbeat and do not affect the
-            // connection state; session 10 owns richer link-error surfacing.
+            // connection state; the Receive screen counts them and shows the
+            // total so a noisy link is visible without flapping this state.
             is TransportEvent.DecodeError -> Unit
         }
     }

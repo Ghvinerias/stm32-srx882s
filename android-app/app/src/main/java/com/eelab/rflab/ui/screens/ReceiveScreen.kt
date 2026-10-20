@@ -52,9 +52,10 @@ import java.util.Locale
  * Rows can be checked (tap the row or the checkbox) and copied into the
  * shared send queue in one action.
  *
- * The connection itself is a placeholder holder for now: session 9 wires the
- * Connect screen to it. With nothing attached this screen shows its empty
- * state.
+ * The ViewModel is normally created once by the app composition root (so a
+ * connection that is already open feeds this list immediately); with nothing
+ * attached this screen shows its empty state. Malformed frames are counted in
+ * the header but never interrupt decoding.
  */
 @Composable
 fun ReceiveScreen(
@@ -135,6 +136,17 @@ private fun ReceiveHeader(state: ReceiveUiState) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (state.decodeErrorCount > 0) {
+                Text(
+                    text = if (state.decodeErrorCount == 1) {
+                        "1 malformed frame ignored"
+                    } else {
+                        "${state.decodeErrorCount} malformed frames ignored"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
         }
         if (state.queueSize > 0) {
             Text(

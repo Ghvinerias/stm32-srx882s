@@ -11,7 +11,9 @@ import com.eelab.rflab.protocol.TxCommand
 import com.eelab.rflab.queue.SendItemStatus
 import com.eelab.rflab.queue.SendQueueItem
 import com.eelab.rflab.usb.TransportEvent
+import java.io.IOException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
@@ -309,5 +311,127 @@ class BatchSendEngineTest {
             SendItemStatus.TIMEOUT,
             silent.sendScenario(ScenarioCommand(ScenarioCommand.ZERO_HOP)),
         )
+    }
+
+    // --- (g) link failure mid-batch ----------------------------------------
+
+    @Test
+    fun connectionLostWhileWaitingForAckFailsTheItemAndAbortsImmediately() = runTest {
+        val statuses = mutableListOf<Pair<Long, SendItemStatus>>()
+        val writes = mutableListOf<Long>()
+        val engine = BatchSendEngine(
+            events = events,
+            sendPacket = {
+                writes += currentTime
+                launch {
+                    delay(10)
+                    events.emit(TransportEvent.ConnectionLost(IOException("device unplugged")))
+                }
+            },
+            // Far longer than the test: the loss must resolve the wait, not
+            // the timeout.
+            ackTimeoutMs = 5_000,
+        )
+
+        engine.sendBatch(listOf(item(1), item(2), item(3))) { id, status ->
+            statuses += id to status
+        }
+
+        // Only the in-flight item was written; nothing was sent after the loss.
+        assertEquals(listOf(0L), writes)
+        assertEquals(
+            listOf(1L to SendItemStatus.SENDING, 1L to SendItemStatus.FAILED),
+            statuses,
+        )
+        // Aborted at the loss (10 ms), not after the 5 s ACK budget.
+        assertEquals(10L, currentTime)
+    }
+
+    @Test
+    fun writeFailureMarksTheItemFailedAndLeavesLaterItemsPending() = runTest {
+        val statuses = mutableListOf<Pair<Long, SendItemStatus>>()
+        var writes = 0
+        val engine = BatchSendEngine(
+            events = events,
+            sendPacket = {
+                writes++
+                if (writes == 2) throw IOException("USB connection is closed")
+                launch {
+                    delay(10)
+                    events.emit(ack(PacketType.TX_COMMAND))
+                }
+            },
+            ackTimeoutMs = 200,
+        )
+
+        engine.sendBatch(listOf(item(1), item(2), item(3))) { id, status ->
+            statuses += id to status
+        }
+
+        assertEquals(2, writes)
+        assertEquals(
+            listOf(
+                1L to SendItemStatus.SENDING,
+                1L to SendItemStatus.ACKED_OK,
+                2L to SendItemStatus.SENDING,
+                2L to SendItemStatus.FAILED,
+                // Item 3 was never attempted, so it gets no callback at all
+                // and stays PENDING in the queue.
+            ),
+            statuses,
+        )
+    }
+
+    @Test
+    fun scenarioLinkLossAndWriteFailureMapToFailed() = runTest {
+        val lost = BatchSendEngine(
+            events = events,
+            sendPacket = {
+                launch {
+                    delay(10)
+                    events.emit(TransportEvent.ConnectionLost(IOException("gone")))
+                }
+            },
+            ackTimeoutMs = 5_000,
+        )
+        assertEquals(
+            SendItemStatus.FAILED,
+            lost.sendScenario(ScenarioCommand(ScenarioCommand.STALE_REPLAY)),
+        )
+
+        val closed = BatchSendEngine(
+            events = events,
+            sendPacket = { throw IOException("USB device is not connected") },
+            ackTimeoutMs = 5_000,
+        )
+        assertEquals(
+            SendItemStatus.FAILED,
+            closed.sendScenario(ScenarioCommand(ScenarioCommand.STALE_REPLAY)),
+        )
+    }
+
+    @Test
+    fun cancellingMidBatchLeavesNoItemStuckAsSending() = runTest {
+        val statuses = mutableListOf<Pair<Long, SendItemStatus>>()
+        val engine = BatchSendEngine(
+            events = events,
+            sendPacket = { /* never acknowledged */ },
+            ackTimeoutMs = 10_000,
+        )
+
+        val job = launch {
+            engine.sendBatch(listOf(item(1), item(2))) { id, status ->
+                statuses += id to status
+            }
+        }
+        runCurrent()
+        assertEquals(listOf(1L to SendItemStatus.SENDING), statuses)
+
+        job.cancelAndJoin()
+
+        // The cancelled in-flight item must not stay SENDING in the
+        // process-scoped queue; item 2 was never attempted.
+        assertEquals(1L to SendItemStatus.FAILED, statuses.last())
+        assertEquals(1, statuses.count { it.second == SendItemStatus.SENDING })
     }
 }

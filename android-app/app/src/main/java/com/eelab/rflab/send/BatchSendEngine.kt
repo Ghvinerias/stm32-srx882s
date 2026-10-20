@@ -10,11 +10,13 @@ import com.eelab.rflab.usb.TransportEvent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -80,18 +82,23 @@ class BatchSendEngine(
      *
      * For each item: [onStatusChange] is called with [SendItemStatus.SENDING]
      * before the write, then once more with the terminal status
-     * ([SendItemStatus.ACKED_OK], [SendItemStatus.ACKED_FAILED] or
-     * [SendItemStatus.TIMEOUT]). The next item is not written until that
-     * terminal callback has run.
+     * ([SendItemStatus.ACKED_OK], [SendItemStatus.ACKED_FAILED],
+     * [SendItemStatus.TIMEOUT] or [SendItemStatus.FAILED]). The next item is
+     * not written until that terminal callback has run.
      *
      * A timeout does not abort the batch: the device may simply have dropped
-     * one command, and the brief describes timeout-then-continue. A *write*
-     * failure (for example the device was unplugged) does abort the
-     * remaining items, because sending into a closed link would only burn one
-     * timeout per item; those items stay [SendItemStatus.PENDING]. The
-     * failed write is reported as [SendItemStatus.TIMEOUT] because the
-     * protocol model has no separate transport-error state (session 10 owns
-     * richer disconnect handling).
+     * one command, and the brief describes timeout-then-continue. A *link*
+     * failure does abort it, in one of two ways:
+     *
+     * - a write throws (the port is closed, or the device vanished), or
+     * - a [TransportEvent.ConnectionLost] arrives while waiting for the ACK.
+     *
+     * In both cases the in-flight item becomes [SendItemStatus.FAILED] and the
+     * remaining items keep [SendItemStatus.PENDING] — they were never
+     * attempted and can be sent by pressing "Send All" again. Without the
+     * `ConnectionLost` observation a dead link would cost one full ACK timeout
+     * per item; without the [CancellationException] guard an item could be
+     * left spinning as [SendItemStatus.SENDING] in the shared queue forever.
      *
      * @param onStatusChange invoked on the caller's coroutine context, in
      *   order. It should be cheap (updating a queue/repository), not block.
@@ -103,33 +110,57 @@ class BatchSendEngine(
         if (items.isEmpty()) return
 
         sendMutex.withLock {
-            for (item in items) {
-                onStatusChange(item.id, SendItemStatus.SENDING)
+            var inFlightId: Long? = null
+            try {
+                for (item in items) {
+                    inFlightId = item.id
+                    onStatusChange(item.id, SendItemStatus.SENDING)
 
-                val result = sendAndAwait(
-                    rawPacket = PacketCodec.encodeTxCommand(item.toTxCommand()),
-                    expectedForType = PacketType.TX_COMMAND,
-                )
-
-                when (result) {
-                    is AwaitResult.Acknowledged -> onStatusChange(
-                        item.id,
-                        if (result.accepted) {
-                            SendItemStatus.ACKED_OK
-                        } else {
-                            SendItemStatus.ACKED_FAILED
-                        },
+                    val result = sendAndAwait(
+                        rawPacket = PacketCodec.encodeTxCommand(item.toTxCommand()),
+                        expectedForType = PacketType.TX_COMMAND,
                     )
 
-                    AwaitResult.TimedOut -> onStatusChange(item.id, SendItemStatus.TIMEOUT)
+                    when (result) {
+                        is AwaitResult.Acknowledged -> onStatusChange(
+                            item.id,
+                            if (result.accepted) {
+                                SendItemStatus.ACKED_OK
+                            } else {
+                                SendItemStatus.ACKED_FAILED
+                            },
+                        )
 
-                    is AwaitResult.WriteFailed -> {
-                        onStatusChange(item.id, SendItemStatus.TIMEOUT)
-                        // Link is gone: do not spend a timeout on every
-                        // remaining item. They keep their prior status.
-                        return
+                        AwaitResult.TimedOut -> onStatusChange(item.id, SendItemStatus.TIMEOUT)
+
+                        AwaitResult.LinkLost,
+                        is AwaitResult.WriteFailed,
+                        -> {
+                            // The link is gone: report this item honestly and
+                            // stop rather than spending a timeout on each of
+                            // the remaining items. Those stay PENDING (not
+                            // sent) so a retry does not repeat work.
+                            onStatusChange(item.id, SendItemStatus.FAILED)
+                            return
+                        }
+                    }
+                    inFlightId = null
+                }
+            } catch (cancelled: CancellationException) {
+                // The screen (or process) is going away mid-batch. Still
+                // leave a definite status behind: the queue is process-scoped,
+                // so a SENDING badge would otherwise survive until restart.
+                inFlightId?.let { id ->
+                    withContext(NonCancellable) {
+                        onStatusChange(id, SendItemStatus.FAILED)
                     }
                 }
+                throw cancelled
+            } catch (error: Throwable) {
+                // Defensive: encoding is validated up front, so this should
+                // not happen — but never leave an item stuck as SENDING.
+                inFlightId?.let { onStatusChange(it, SendItemStatus.FAILED) }
+                throw error
             }
         }
     }
@@ -141,8 +172,9 @@ class BatchSendEngine(
      * second in-flight command into a running batch (or vice versa).
      *
      * @return [SendItemStatus.ACKED_OK] / [SendItemStatus.ACKED_FAILED] from
-     *   the ACK's `accepted` byte, or [SendItemStatus.TIMEOUT] when no ACK
-     *   arrived in time or the write failed.
+     *   the ACK's `accepted` byte, [SendItemStatus.TIMEOUT] when no ACK arrived
+     *   in time, or [SendItemStatus.FAILED] when the write failed or the link
+     *   was lost before the ACK.
      */
     suspend fun sendScenario(cmd: ScenarioCommand): SendItemStatus {
         return sendMutex.withLock {
@@ -155,16 +187,18 @@ class BatchSendEngine(
                 is AwaitResult.Acknowledged ->
                     if (result.accepted) SendItemStatus.ACKED_OK else SendItemStatus.ACKED_FAILED
 
-                AwaitResult.TimedOut,
+                AwaitResult.TimedOut -> SendItemStatus.TIMEOUT
+
+                AwaitResult.LinkLost,
                 is AwaitResult.WriteFailed,
-                -> SendItemStatus.TIMEOUT
+                -> SendItemStatus.FAILED
             }
         }
     }
 
     /**
      * Subscribes to [events], writes one command, then waits for the first
-     * ACK whose `for_type` matches [expectedForType].
+     * ACK whose `for_type` matches [expectedForType] or a link-loss event.
      *
      * The subscription is started *before* [sendPacket] with
      * [CoroutineStart.UNDISPATCHED] so a device that ACKs very quickly cannot
@@ -177,17 +211,25 @@ class BatchSendEngine(
         rawPacket: ByteArray,
         expectedForType: Int,
     ): AwaitResult = coroutineScope {
-        val ack = CompletableDeferred<AckPacket>()
+        val signal = CompletableDeferred<AwaitSignal>()
 
         val collector = launch(start = CoroutineStart.UNDISPATCHED) {
             events.collect { event ->
-                if (event !is TransportEvent.PacketReceived) return@collect
-                val packet = event.packet
-                if (packet is AckPacket &&
-                    packet.forType == expectedForType &&
-                    !ack.isCompleted
-                ) {
-                    ack.complete(packet)
+                if (signal.isCompleted) return@collect
+                when (event) {
+                    is TransportEvent.PacketReceived -> {
+                        val packet = event.packet
+                        if (packet is AckPacket && packet.forType == expectedForType) {
+                            signal.complete(AwaitSignal.Ack(packet))
+                        }
+                    }
+
+                    // No ACK can arrive once the read loop has stopped.
+                    // Resolve now instead of waiting out the timeout on a
+                    // link that is already dead.
+                    is TransportEvent.ConnectionLost -> signal.complete(AwaitSignal.LinkLost)
+
+                    is TransportEvent.DecodeError -> Unit
                 }
             }
         }
@@ -201,11 +243,11 @@ class BatchSendEngine(
                 return@coroutineScope AwaitResult.WriteFailed(error)
             }
 
-            val received = withTimeoutOrNull(ackTimeoutMs) { ack.await() }
-            if (received == null) {
-                AwaitResult.TimedOut
-            } else {
-                AwaitResult.Acknowledged(received.accepted)
+            val received = withTimeoutOrNull(ackTimeoutMs) { signal.await() }
+                ?: return@coroutineScope AwaitResult.TimedOut
+            when (received) {
+                is AwaitSignal.Ack -> AwaitResult.Acknowledged(received.packet.accepted)
+                AwaitSignal.LinkLost -> AwaitResult.LinkLost
             }
         } finally {
             // Never keep collecting between commands: the next command owns
@@ -214,10 +256,20 @@ class BatchSendEngine(
         }
     }
 
+    /** What resolved one command's wait. */
+    private sealed interface AwaitSignal {
+        data class Ack(val packet: AckPacket) : AwaitSignal
+
+        data object LinkLost : AwaitSignal
+    }
+
     private sealed interface AwaitResult {
         data class Acknowledged(val accepted: Boolean) : AwaitResult
 
         data object TimedOut : AwaitResult
+
+        /** The transport reported the connection dead while waiting. */
+        data object LinkLost : AwaitResult
 
         data class WriteFailed(val cause: Throwable) : AwaitResult
     }
