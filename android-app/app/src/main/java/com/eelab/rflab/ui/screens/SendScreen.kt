@@ -50,7 +50,9 @@ import com.eelab.rflab.ui.send.ManualEntryState
 import com.eelab.rflab.ui.send.PresetScenario
 import com.eelab.rflab.ui.send.SendUiState
 import com.eelab.rflab.ui.send.SendViewModel
+import com.eelab.rflab.usb.RfLabSession
 import java.util.Locale
+import kotlinx.coroutines.flow.map
 
 /**
  * Send queue and manual-entry screen.
@@ -65,6 +67,10 @@ import java.util.Locale
  * preset buttons send a one-shot `SCENARIO_COMMAND` through the same serialised
  * path.
  *
+ * Session 9 gates both send actions on the live USB session. Queue editing
+ * still works offline; "Send All" and the preset buttons are disabled and
+ * explain why when the Connect tab has no connection.
+ *
  * @param sendEngine sequential sender supplied by the app composition root.
  */
 @Composable
@@ -75,6 +81,7 @@ fun SendScreen(
         factory = SendViewModel.factory(
             scenarioSender = sendEngine::sendScenario,
             batchSender = sendEngine::sendBatch,
+            connectionStatus = RfLabSession.connection.map { it?.isOpen == true },
         ),
     ),
 ) {
@@ -137,7 +144,10 @@ internal fun SendScreen(
             }
 
             item(key = "presets") {
-                PresetScenarioCard(onPresetScenario = onPresetScenario)
+                PresetScenarioCard(
+                    onPresetScenario = onPresetScenario,
+                    enabled = state.isConnected,
+                )
             }
 
             item(key = "queue-header") {
@@ -172,6 +182,7 @@ internal fun SendScreen(
         SendAllBar(
             itemCount = state.items.size,
             enabled = state.canSendAll,
+            connected = state.isConnected,
             onSendAll = onSendAll,
         )
     }
@@ -206,6 +217,15 @@ private fun SendHeader(state: SendUiState) {
                 text = message,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        if (!state.isConnected) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Not connected — sending is disabled until the board is connected " +
+                    "on the Connect tab.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
             )
         }
     }
@@ -314,7 +334,10 @@ private fun HexField(
 }
 
 @Composable
-private fun PresetScenarioCard(onPresetScenario: (PresetScenario) -> Unit) {
+private fun PresetScenarioCard(
+    onPresetScenario: (PresetScenario) -> Unit,
+    enabled: Boolean,
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -334,12 +357,20 @@ private fun PresetScenarioCard(onPresetScenario: (PresetScenario) -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (!enabled) {
+                Text(
+                    text = "Connect the board to enable preset scenarios.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
 
             PresetScenario.entries.chunked(3).forEach { rowPresets ->
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     rowPresets.forEach { preset ->
                         OutlinedButton(
                             onClick = { onPresetScenario(preset) },
+                            enabled = enabled,
                             contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
                             modifier = Modifier.weight(1f),
                         ) {
@@ -513,6 +544,7 @@ private fun StatusBadge(status: SendItemStatus) {
 private fun SendAllBar(
     itemCount: Int,
     enabled: Boolean,
+    connected: Boolean,
     onSendAll: () -> Unit,
 ) {
     Surface(tonalElevation = 3.dp) {
@@ -542,9 +574,17 @@ private fun SendAllBar(
                 )
             }
             Text(
-                text = "One at a time: each item waits for its ACK or 2 s timeout.",
+                text = if (!connected) {
+                    "Connect the board on the Connect tab to send."
+                } else {
+                    "One at a time: each item waits for its ACK or 2 s timeout."
+                },
                 style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = if (!connected) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
                 textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth(),
             )

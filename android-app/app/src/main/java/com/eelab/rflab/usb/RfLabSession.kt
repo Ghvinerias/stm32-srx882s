@@ -11,16 +11,15 @@ import kotlinx.coroutines.flow.flatMapLatest
 /**
  * The app's current USB connection, if any.
  *
- * This is the session-6 seam between the receive screen and the transport:
- * it lets the screen observe [events] without knowing how a connection is
- * opened. Session 9 replaces the placeholder [attach]/[detach] calls with
- * the real permission/connect lifecycle on the Connect screen; until then
- * nothing attaches a connection, so [events] is simply empty and the
- * receive screen stays in its "no signals yet" state.
+ * This is the seam between the screens and the transport. The Connect screen
+ * (via [UsbConnectController]) attaches the connection it opens and detaches
+ * it on disconnect; the receive screen and the send engine observe [events]
+ * without knowing how a connection is opened.
  *
  * A connection is a hot source: attaching one starts delivering its events,
  * replacing it unsubscribes from the old one first, and detaching returns to
- * an empty stream.
+ * an empty stream. Attaching does not close a previous connection by itself;
+ * use [detach] for that.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 object RfLabSession {
@@ -43,11 +42,9 @@ object RfLabSession {
      * Makes [connection] current, or clears the session when null.
      *
      * Replacing a connection does not close the previous one; call [detach]
-     * first if it should be shut down.
-     *
-     * TODO(session 9): call this from the Connect screen once permission has
-     * been granted and [RfLabConnection.open] succeeds, and detach on
-     * disconnect.
+     * first if it should be shut down. [UsbConnectController] attaches only
+     * after [RfLabConnection.open] succeeds, so Receive/Send start sharing the
+     * stream immediately.
      */
     fun attach(connection: RfLabConnection?) {
         _connection.value = connection

@@ -12,9 +12,11 @@ import com.eelab.rflab.queue.SendItemStatus
 import com.eelab.rflab.queue.SendQueueItem
 import com.eelab.rflab.queue.SendQueueRepository
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -41,6 +43,10 @@ private const val TAG = "SendViewModel"
  * @param sendQueue shared queue also filled by the receive screen.
  * @param scenarioSender single-shot preset sender; supplied by the app root.
  * @param batchSender sequential batch sender; supplied by the app root.
+ * @param connectionStatus live USB-session presence. Sending is refused while
+ *   false; queue edits remain available. Production wires this from
+ *   [com.eelab.rflab.usb.RfLabSession.connection]; the default keeps isolated
+ *   tests/previews connected.
  */
 class SendViewModel(
     private val sendQueue: SendQueueRepository = SendQueueRepository.shared,
@@ -50,6 +56,7 @@ class SendViewModel(
         List<SendQueueItem>,
         (Long, SendItemStatus) -> Unit,
     ) -> Unit = ::stubBatchSender,
+    connectionStatus: Flow<Boolean> = flowOf(true),
 ) : ViewModel() {
 
     /** Guards against two overlapping "Send All" coroutines. */
@@ -65,6 +72,11 @@ class SendViewModel(
         viewModelScope.launch {
             sendQueue.items.collect { items ->
                 _uiState.update { it.copy(items = items) }
+            }
+        }
+        viewModelScope.launch {
+            connectionStatus.collect { connected ->
+                _uiState.update { it.copy(isConnected = connected) }
             }
         }
     }
@@ -184,6 +196,10 @@ class SendViewModel(
      * running batch so the device never sees two in-flight commands.
      */
     fun sendPreset(preset: PresetScenario) {
+        if (!_uiState.value.isConnected) {
+            _uiState.update { it.copy(message = NOT_CONNECTED_MESSAGE) }
+            return
+        }
         val command = ScenarioCommand(preset.commandChar)
         viewModelScope.launch {
             _uiState.update { it.copy(message = "Sending scenario '${preset.commandChar}'…") }
@@ -205,6 +221,10 @@ class SendViewModel(
     fun sendAll() {
         val snapshot = sendQueue.items.value
         if (snapshot.isEmpty()) return
+        if (!_uiState.value.isConnected) {
+            _uiState.update { it.copy(message = NOT_CONNECTED_MESSAGE) }
+            return
+        }
         if (sendBatchJob?.isActive == true) {
             _uiState.update { it.copy(message = "Batch already running") }
             return
@@ -246,10 +266,14 @@ class SendViewModel(
     }
 
     companion object {
+        /** Shown when a send action is attempted with no live USB session. */
+        const val NOT_CONNECTED_MESSAGE: String =
+            "Not connected — connect the board on the Connect tab"
+
         /**
          * ViewModel factory wired to the shared queue and the sequential send
          * engine (see [com.eelab.rflab.send.SendGraph]). Tests inject their
-         * own senders.
+         * own senders and connection status.
          */
         fun factory(
             sendQueue: SendQueueRepository = SendQueueRepository.shared,
@@ -259,8 +283,11 @@ class SendViewModel(
                 List<SendQueueItem>,
                 (Long, SendItemStatus) -> Unit,
             ) -> Unit = ::stubBatchSender,
+            connectionStatus: Flow<Boolean> = flowOf(true),
         ): ViewModelProvider.Factory = viewModelFactory {
-            initializer { SendViewModel(sendQueue, scenarioSender, batchSender) }
+            initializer {
+                SendViewModel(sendQueue, scenarioSender, batchSender, connectionStatus)
+            }
         }
     }
 }

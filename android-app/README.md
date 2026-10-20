@@ -1,19 +1,22 @@
 # STM32 RF Lab — Android app (WIP)
 
 **Status: protocol primitives, raw packet layer, USB transport, HCS301
-decoder, live receive screen, send queue and the sequential batch-send
-engine are in place** (session 8 of the 10-session plan in
-[`PLAN.md`](PLAN.md)); the authoritative protocol and decode details live
-in [`AGENT_BRIEF.md`](AGENT_BRIEF.md).
+decoder, live receive screen, send queue, sequential batch-send engine and the
+real Connect screen/lifecycle wiring are in place** (session 9 of the
+10-session plan in [`PLAN.md`](PLAN.md)); the authoritative protocol and
+decode details live in [`AGENT_BRIEF.md`](AGENT_BRIEF.md).
 
-The **Receive** tab decodes FRAME packets from the current connection,
-collapses press repeats into rows and can copy selected rows to a shared
-send queue. The **Send** tab manages that queue, supports manual entry and
-the six preset scenarios, and sends strictly one command at a time:
+The **Connect** tab finds the board (VID `0xCAFE` / PID `0x4001`), requests
+USB permission through the Android permission dialog, opens the CDC-ACM port
+and attaches it to the shared session. It then shows a STATUS-heartbeat
+indicator (fresh/stale, 3 s threshold) and the optional clock/edge
+diagnostics. The **Receive** tab decodes FRAME packets from that same
+connection, collapses press repeats into rows and can copy selected rows to a
+shared send queue. The **Send** tab manages that queue, supports manual entry
+and the six preset scenarios, and sends strictly one command at a time:
 each item is written, then the next ACK (or a 2 s timeout) must resolve
-before the next item starts. **Connect** is still a placeholder (session
-9), and nothing attaches a connection yet, so sends currently report a
-timeout instead of reaching hardware.
+before the next item starts. Sending is disabled while disconnected; queue
+editing still works offline.
 
 ## What exists
 
@@ -107,9 +110,47 @@ timeout instead of reaching hardware.
   - JVM tests use a `MutableSharedFlow` fake event source and a captured
     write function to cover prompt ACK, `accepted = 0`, timeout,
     unrelated traffic, strict 3-item ordering, and the scenario path.
-- `com.eelab.rflab.usb.RfLabSession`: placeholder holder for the current
-  `RfLabConnection`. `attach`/`detach` are unused until session 9 wires the
-  Connect screen; `events` is empty while nothing is attached.
+- `com.eelab.rflab.usb.ConnectPort` / `UsbConnectController` (session 9):
+  the connection-lifecycle seam. `ConnectPort` is the small JVM-testable
+  interface (`connect()`, `disconnect()`, `isConnected()`, `events`);
+  `UsbConnectController` is the production implementation that enumerates
+  `UsbManager.deviceList`, asks `UsbPermission` for access, opens
+  `RfLabConnection` and calls `RfLabSession.attach(...)`. It holds only the
+  **application Context** — USB permission is delivered through a
+  `PendingIntent` broadcast, so no Activity is needed. The permission wait is
+  a coroutine suspension and the blocking port open runs off the main
+  thread; an open that finishes after the user cancelled is closed instead of
+  attached.
+- `com.eelab.rflab.ui.connect` (session 9), the Connect screen state:
+  - `ConnectViewModel` exposes `Disconnected` / `Connecting` /
+    `PermissionDenied` / `Connected` / `Error(message)` and drives
+    connect/disconnect through `ConnectPort`. A `ConnectionLost` transport
+    event moves to `Error` and detaches the dead link. Leaving the tab does
+    not disconnect; re-creating the ViewModel while attached starts as
+    `Connected`.
+  - `StatusHeartbeat` is a pure, clock-injected liveness tracker: `WAITING`
+    until the first STATUS, `LIVE` while one has arrived within **3 s**,
+    `STALE` after 3 s without one (including before the first STATUS, using
+    the connection time as the reference). The ViewModel re-checks it every
+    **500 ms**, so a silent link goes stale with no packets arriving.
+  - STATUS's `clock_hz`, `total_edges`, `dropped_packets` and sequence are
+    reassembled for the optional diagnostics card.
+  - `ConnectScreen` replaces the stub: colored state dot, phase and
+    heartbeat text, connect/disconnect (and cancel-while-connecting)
+    buttons, and the diagnostics readout once STATUS arrives.
+- Session 9 send gating: `SendViewModel` also observes
+  `RfLabSession.connection`, so "Send All" and the preset buttons are
+  disabled and refuse to run with a clear message while disconnected.
+  `canSendAll` requires both a non-empty queue and a live link. Receive
+  needs no change: with nothing attached, `RfLabSession.events` is empty and
+  the screen keeps its existing "No signals yet" state.
+- `UsbPermission` now scopes its mutable `PendingIntent` action to the app's
+  package. Android 14+ rejects implicit mutable `PendingIntent`s, which
+  would otherwise make the permission request crash before the dialog.
+- `com.eelab.rflab.usb.RfLabSession`: the app-wide current
+  `RfLabConnection`. The Connect path attaches after a successful open and
+  detaches on disconnect (or connection loss); `events` switches to/from an
+  empty stream with it.
 - Dependencies added for the ViewModel/Compose wiring:
   `lifecycle-runtime-compose`, `lifecycle-viewmodel-ktx`,
   `lifecycle-viewmodel-compose`, and `kotlinx-coroutines-test` for JVM tests.
@@ -135,27 +176,42 @@ The debug APK lands in `app/build/outputs/apk/debug/`.
 - Session 7 reads `SendQueueRepository.shared.items` and can render/reorder/
   remove from it. The repository assigns ids and allows duplicates on
   purpose; the receive screen only appends.
-- Session 9 must call `RfLabSession.attach(connection)` after
-  `RfLabConnection.open(...)` succeeds and `RfLabSession.detach()` on
-  disconnect. The receive ViewModel already observes `RfLabSession.events`;
-  no UI change is needed there.
+- The Connect path is the only place that should call
+  `RfLabSession.attach(...)` / `detach()`. `UsbConnectController` attaches
+  after a successful `RfLabConnection.open(...)`; the Receive and Send
+  screens observe the session, so they need no reconnect logic of their own.
+- USB permission and the blocking port open do not need an Activity: the
+  permission answer arrives by broadcast to the application context, and the
+  screen only calls the ViewModel. If a future change adds an
+  `ActivityResult`-based flow, keep it above `ConnectPort` rather than
+  leaking an Activity into the ViewModel.
+- Liveness is heartbeat-based, not connection-based: `ConnectUiState` can be
+  `Connected` + `STALE` when the port is open but STATUS stops. The 3 s
+  threshold and 500 ms poll live in `StatusHeartbeat` /
+  `ConnectViewModel.LIVENESS_TICK_MS`.
 - The receive screen keeps one `ScaleEstimator` for the ViewModel's
-  lifetime, matching the brief's per-connection-session scale. Session 9 can
+  lifetime, matching the brief's per-connection-session scale. Session 10 can
   start a fresh receive ViewModel when opening a new connection if it wants
   calibration restarted for a different transmitter; reusing the pooled
   estimate still decodes, it just mixes both transmitters' data cells.
 - `RfLabConnection.events` has no replay: subscribe before connecting if
   every packet matters. The buffer applies backpressure rather than dropping
-  packets under a slow collector.
-- The USB-dependent parts (`UsbManager`, `CdcAcmSerialDriver`, permission
-  dialog) need a real device or instrumentation; all stream/framing logic
-  lives in `PacketReassembler` and is unit-tested on the JVM.
+  packets under a slow collector. The Connect screen's heartbeat starts
+  before the next STATUS (up to 1 s later), so the first ~1 s shows
+  `WAITING`, which is expected.
+- The USB-dependent parts (`UsbManager`, `CdcAcmSerialDriver`, the permission
+  dialog) need a real device or instrumentation. `ConnectPort` is the seam
+  used to JVM-test the whole connect state machine, permission-denial/error
+  paths and heartbeat staleness with a fake; stream/framing logic remains in
+  `PacketReassembler` and is unit-tested separately.
 - Sending stays strictly sequential: one command, wait for its ACK or a
   timeout, then the next. Any change to `BatchSendEngine` must preserve that
   and the single shared instance from `SendGraph`; the ACK protocol has no
   request id, so pipelining makes ACK attribution ambiguous. Session 10
   should decide how much of a mid-batch disconnect to surface beyond the
   current "abort remaining items, mark the failed write as timeout" rule.
+  The UI already disables sends once the session detaches; a disconnect in
+  the middle of an in-flight batch still ends that item as a timeout.
 - Feed every received `FramePacket.pulses` to `ScaleEstimator.addFrame(...)`
   before decoding (even malformed-length frames: the reference pools their
   data cells too). Decode each frame with the estimator's current `scale`.

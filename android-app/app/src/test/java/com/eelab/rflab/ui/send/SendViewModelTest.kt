@@ -7,6 +7,9 @@ import com.eelab.rflab.queue.SendQueueItem
 import com.eelab.rflab.queue.SendQueueRepository
 import com.eelab.rflab.testing.MainDispatcherRule
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.flowOf
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -41,7 +44,9 @@ class SendViewModelTest {
         sentBatches.clear()
     }
 
-    private fun newViewModel(): SendViewModel = SendViewModel(
+    private fun newViewModel(
+        connectionStatus: Flow<Boolean> = flowOf(true),
+    ): SendViewModel = SendViewModel(
         sendQueue = sendQueue,
         scenarioSender = { command ->
             sentScenarios += command
@@ -52,6 +57,7 @@ class SendViewModelTest {
             // Stand-in for the engine's per-item terminal callbacks.
             items.forEach { onStatusChange(it.id, SendItemStatus.ACKED_OK) }
         },
+        connectionStatus = connectionStatus,
     )
 
     private fun fillValidEntry(
@@ -327,5 +333,50 @@ class SendViewModelTest {
 
         assertTrue(sentBatches.isEmpty())
         assertNull(viewModel.uiState.value.message)
+    }
+
+    // --- Session-9 connection gating ---------------------------------------
+
+    @Test
+    fun sendAllIsRefusedWhileDisconnected() {
+        val viewModel = newViewModel(connectionStatus = flowOf(false))
+        sendQueue.enqueue(0xA, 1, 1)
+
+        assertFalse(viewModel.uiState.value.canSendAll)
+
+        viewModel.sendAll()
+
+        assertTrue(sentBatches.isEmpty())
+        assertEquals(SendViewModel.NOT_CONNECTED_MESSAGE, viewModel.uiState.value.message)
+    }
+
+    @Test
+    fun presetScenarioIsRefusedWhileDisconnected() {
+        val viewModel = newViewModel(connectionStatus = flowOf(false))
+
+        viewModel.sendPreset(PresetScenario.STALE_REPLAY)
+
+        assertTrue(sentScenarios.isEmpty())
+        assertEquals(SendViewModel.NOT_CONNECTED_MESSAGE, viewModel.uiState.value.message)
+    }
+
+    @Test
+    fun connectionStatusFlowDrivesSendAvailability() {
+        val status = MutableStateFlow(false)
+        val viewModel = newViewModel(connectionStatus = status)
+
+        assertFalse(viewModel.uiState.value.isConnected)
+        assertFalse(viewModel.uiState.value.canSendAll)
+
+        sendQueue.enqueue(0xA, 1, 1)
+        assertFalse(viewModel.uiState.value.canSendAll)
+
+        status.value = true
+        assertTrue(viewModel.uiState.value.isConnected)
+        assertTrue(viewModel.uiState.value.canSendAll)
+
+        status.value = false
+        assertFalse(viewModel.uiState.value.isConnected)
+        assertFalse(viewModel.uiState.value.canSendAll)
     }
 }

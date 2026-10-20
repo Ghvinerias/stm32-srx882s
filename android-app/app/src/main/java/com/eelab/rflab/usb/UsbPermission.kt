@@ -102,7 +102,11 @@ object UsbPermission {
 
         val permissionIntent = Intent(action)
         // On Android 12+ the system adds the result extras to this intent, so
-        // the PendingIntent must be mutable.
+        // the PendingIntent must be mutable. Android 14 rejects *implicit*
+        // mutable PendingIntents, so scope the action to this app's package
+        // (the receiver is registered here, and the system only needs to
+        // deliver the result back to us).
+        permissionIntent.setPackage(context.packageName)
         var flags = PendingIntent.FLAG_UPDATE_CURRENT
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             flags = flags or PendingIntent.FLAG_MUTABLE

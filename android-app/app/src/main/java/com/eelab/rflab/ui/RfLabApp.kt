@@ -12,8 +12,10 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
@@ -26,6 +28,7 @@ import com.eelab.rflab.send.SendGraph
 import com.eelab.rflab.ui.screens.ConnectScreen
 import com.eelab.rflab.ui.screens.ReceiveScreen
 import com.eelab.rflab.ui.screens.SendScreen
+import com.eelab.rflab.usb.UsbConnectController
 
 private enum class Destination(
     val route: String,
@@ -40,10 +43,18 @@ private enum class Destination(
 /**
  * Top-level shell: three destinations with bottom navigation.
  *
- * This is also the app-level composition root for the send path: one
- * [SendGraph.engine] instance is created here and handed to the send screen,
- * so batch sends and preset scenarios share the same serialising mutex.
- * Session 9 does the final connection/navigation wiring.
+ * This is the app-level composition root for both shared resources:
+ *
+ * - one [SendGraph.engine] instance, so batch sends and preset scenarios
+ *   share the same serialising mutex;
+ * - one [UsbConnectController], built from the application context, which
+ *   attaches/detaches the single connection in
+ *   [com.eelab.rflab.usb.RfLabSession]. Receive and Send observe that same
+ *   session, so tapping Connect on the first tab immediately feeds the
+ *   others.
+ *
+ * Only the application context is retained: USB permission uses a
+ * `PendingIntent` broadcast and does not require the Activity.
  */
 @Composable
 fun RfLabApp() {
@@ -52,11 +63,16 @@ fun RfLabApp() {
     val currentDestination = backStackEntry?.destination
     // One sequential sender for the whole app: never two commands in flight.
     val sendEngine = SendGraph.engine
+    val appContext = LocalContext.current.applicationContext
+    // Survives recomposition and tab switches; owns no Activity reference.
+    val connectPort = remember(appContext) { UsbConnectController(appContext) }
 
     Scaffold(
         bottomBar = {
             NavigationBar {
-                Destination.entries.forEach { destination ->
+                // Plain loop, not Iterable.forEach: the latter is API 24 and
+                // minSdk here is 23 (lint NewApi).
+                for (destination in Destination.entries) {
                     val label = stringResource(destination.labelRes)
                     NavigationBarItem(
                         selected = currentDestination?.hierarchy?.any {
@@ -83,7 +99,7 @@ fun RfLabApp() {
             startDestination = Destination.Connect.route,
             modifier = Modifier.padding(innerPadding),
         ) {
-            composable(Destination.Connect.route) { ConnectScreen() }
+            composable(Destination.Connect.route) { ConnectScreen(port = connectPort) }
             composable(Destination.Receive.route) { ReceiveScreen() }
             composable(Destination.Send.route) { SendScreen(sendEngine = sendEngine) }
         }

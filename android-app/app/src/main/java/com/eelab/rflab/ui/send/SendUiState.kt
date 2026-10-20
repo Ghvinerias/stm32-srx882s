@@ -9,13 +9,16 @@ import com.eelab.rflab.queue.SendQueueItem
  * @property items shared-queue snapshot, top of the send order first.
  * @property manualEntry four-field manual-entry form and its validation errors.
  * @property message short feedback line for the last add/scenario/send action.
+ * @property isConnected whether the shared USB session currently has a live
+ *   connection. Queue editing stays available offline; sending does not.
  */
 data class SendUiState(
     val items: List<SendQueueItem> = emptyList(),
     val manualEntry: ManualEntryState = ManualEntryState(),
     val message: String? = null,
+    val isConnected: Boolean = true,
 ) {
-    val canSendAll: Boolean get() = items.isNotEmpty()
+    val canSendAll: Boolean get() = items.isNotEmpty() && isConnected
 }
 
 /**
