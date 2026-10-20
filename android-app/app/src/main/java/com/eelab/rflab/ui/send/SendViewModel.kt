@@ -6,7 +6,6 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import com.eelab.rflab.protocol.ScenarioCommand
 import com.eelab.rflab.protocol.TxCommand
 import com.eelab.rflab.queue.SendItemStatus
 import com.eelab.rflab.queue.SendQueueItem
@@ -26,17 +25,15 @@ private const val TAG = "SendViewModel"
 /**
  * State and actions for the send queue screen.
  *
- * Owns queue management (add, remove, reorder, frame-count editing), manual
- * hopping/serial/button/frames entry and the six preset scenario buttons, and
- * drives the real sequential send engine through two injected senders:
+ * Owns queue management (add, remove, reorder, frame-count editing, clearing),
+ * manual hopping/serial/button/frames entry, and drives the real sequential
+ * send engine through one injected sender:
  *
- * - [scenarioSender] sends one validated [ScenarioCommand] and returns its
- *   terminal status (one-shot `SCENARIO_COMMAND`, waits for `for_type = 4`).
  * - [batchSender] drains the queue strictly one item at a time, reporting
  *   per-item status through the callback (which updates the shared queue), and
  *   waits for each item's ACK or timeout before writing the next.
  *
- * Both senders map a dead USB link to [SendItemStatus.FAILED]; a batch that
+ * The sender maps a dead USB link to [SendItemStatus.FAILED]; a batch that
  * stops because of one leaves the unattempted items [SendItemStatus.PENDING]
  * and the summary below says how many were not sent.
  *
@@ -45,7 +42,6 @@ private const val TAG = "SendViewModel"
  * previewed/tested without a USB link.
  *
  * @param sendQueue shared queue also filled by the receive screen.
- * @param scenarioSender single-shot preset sender; supplied by the app root.
  * @param batchSender sequential batch sender; supplied by the app root.
  * @param connectionStatus live USB-session presence. Sending is refused while
  *   false; queue edits remain available. Production wires this from
@@ -54,8 +50,6 @@ private const val TAG = "SendViewModel"
  */
 class SendViewModel(
     private val sendQueue: SendQueueRepository = SendQueueRepository.shared,
-    private val scenarioSender: suspend (ScenarioCommand) -> SendItemStatus =
-        ::stubScenarioSender,
     private val batchSender: suspend (
         List<SendQueueItem>,
         (Long, SendItemStatus) -> Unit,
@@ -190,36 +184,26 @@ class SendViewModel(
         publishQueue()
     }
 
-    // --- Send actions -------------------------------------------------------
-
     /**
-     * Builds the [ScenarioCommand] for [preset] and sends it as a one-shot
-     * `SCENARIO_COMMAND`, awaiting its type-4 ACK or timeout.
+     * Drops every queued item.
      *
-     * Runs in [viewModelScope]; the engine serialises this against any
-     * running batch so the device never sees two in-flight commands.
+     * Refused while a batch is actively sending: the engine walks a snapshot,
+     * so clearing mid-batch would hide items that are still being transmitted
+     * and leave the final summary counting against a queue that no longer
+     * holds them. Wait for the batch to finish instead.
      */
-    fun sendPreset(preset: PresetScenario) {
-        if (!_uiState.value.isConnected) {
-            _uiState.update { it.copy(message = NOT_CONNECTED_MESSAGE) }
+    fun clearQueue() {
+        if (sendBatchJob?.isActive == true) {
+            _uiState.update {
+                it.copy(message = "Can't clear the queue while a batch is sending")
+            }
             return
         }
-        val command = ScenarioCommand(preset.commandChar)
-        viewModelScope.launch {
-            _uiState.update { it.copy(message = "Sending scenario '${preset.commandChar}'…") }
-            val status = try {
-                scenarioSender(command)
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                Log.w(TAG, "Scenario send failed", error)
-                SendItemStatus.FAILED
-            }
-            _uiState.update {
-                it.copy(message = "Scenario '${preset.commandChar}': ${status.label()}")
-            }
-        }
+        sendQueue.clear()
+        publishQueue()
     }
+
+    // --- Send actions -------------------------------------------------------
 
     /**
      * Sends the current queue strictly one item at a time.
@@ -313,8 +297,6 @@ class SendViewModel(
          */
         fun factory(
             sendQueue: SendQueueRepository = SendQueueRepository.shared,
-            scenarioSender: suspend (ScenarioCommand) -> SendItemStatus =
-                ::stubScenarioSender,
             batchSender: suspend (
                 List<SendQueueItem>,
                 (Long, SendItemStatus) -> Unit,
@@ -322,7 +304,7 @@ class SendViewModel(
             connectionStatus: Flow<Boolean> = flowOf(true),
         ): ViewModelProvider.Factory = viewModelFactory {
             initializer {
-                SendViewModel(sendQueue, scenarioSender, batchSender, connectionStatus)
+                SendViewModel(sendQueue, batchSender, connectionStatus)
             }
         }
     }
@@ -384,15 +366,6 @@ private fun Char.isHexDigit(): Boolean =
     this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
 
 /**
- * Fallback sender used when no engine is wired (previews, isolated tests).
- * Reports a timeout because nothing was actually transmitted.
- */
-private suspend fun stubScenarioSender(command: ScenarioCommand): SendItemStatus {
-    Log.i(TAG, "No send engine wired for scenario '${command.commandChar}'")
-    return SendItemStatus.TIMEOUT
-}
-
-/**
  * Fallback batch sender used when no engine is wired. Reports each item as
  * timed out without touching the wire, so the UI has a definite end state.
  */
@@ -404,14 +377,4 @@ private suspend fun stubBatchSender(
     for (item in items) {
         onStatusChange(item.id, SendItemStatus.TIMEOUT)
     }
-}
-
-/** Short user-facing name for the batch status badges/messages. */
-private fun SendItemStatus.label(): String = when (this) {
-    SendItemStatus.PENDING -> "Pending"
-    SendItemStatus.SENDING -> "Sending"
-    SendItemStatus.ACKED_OK -> "ACKed OK"
-    SendItemStatus.ACKED_FAILED -> "ACKed failed"
-    SendItemStatus.TIMEOUT -> "Timeout"
-    SendItemStatus.FAILED -> "USB link failed"
 }

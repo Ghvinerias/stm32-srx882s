@@ -8,7 +8,7 @@ import com.eelab.rflab.queue.SendQueueItem
  *
  * @property items shared-queue snapshot, top of the send order first.
  * @property manualEntry four-field manual-entry form and its validation errors.
- * @property message short feedback line for the last add/scenario/send action.
+ * @property message short feedback line for the last add/send/clear action.
  * @property isConnected whether the shared USB session currently has a live
  *   connection. Queue editing stays available offline; sending does not.
  */
@@ -19,6 +19,8 @@ data class SendUiState(
     val isConnected: Boolean = true,
 ) {
     val canSendAll: Boolean get() = items.isNotEmpty() && isConnected
+
+    val canClearQueue: Boolean get() = items.isNotEmpty()
 }
 
 /**
@@ -48,11 +50,12 @@ data class ManualEntryState(
 }
 
 /**
- * The six preset scenario commands exposed by the send screen.
+ * The six preset scenario commands defined by the brief.
  *
  * Order and characters match the brief: `'r'`, `'s'`, `'z'`, `'p'`, `'x'`,
- * `'d'`. The UI renders one button per entry; the ViewModel supplies the
- * lambda that actually writes the encoded command to the USB link.
+ * `'d'`. Kept as the canonical preset list for the protocol/engine even though
+ * the send screen no longer renders buttons for them; one-shot sends remain
+ * available through [com.eelab.rflab.send.BatchSendEngine.sendScenario].
  */
 enum class PresetScenario(
     val commandChar: Char,

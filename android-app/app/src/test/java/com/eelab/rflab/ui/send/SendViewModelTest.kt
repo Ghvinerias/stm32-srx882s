@@ -1,12 +1,12 @@
 package com.eelab.rflab.ui.send
 
-import com.eelab.rflab.protocol.ScenarioCommand
 import com.eelab.rflab.protocol.TxCommand
 import com.eelab.rflab.queue.SendItemStatus
 import com.eelab.rflab.queue.SendQueueItem
 import com.eelab.rflab.queue.SendQueueRepository
 import com.eelab.rflab.testing.MainDispatcherRule
 import java.io.IOException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,11 +21,11 @@ import org.junit.Rule
 import org.junit.Test
 
 /**
- * Queue management, manual-entry validation and preset-scenario tests for
+ * Queue management, manual-entry validation and clear-queue tests for
  * [SendViewModel].
  *
- * The scenario and batch lambdas are captured per test, so nothing touches
- * the USB layer; session 8's sequential engine is tested separately in
+ * The batch lambda is captured per test, so nothing touches the USB layer;
+ * session 8's sequential engine is tested separately in
  * `BatchSendEngineTest`.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -35,13 +35,11 @@ class SendViewModelTest {
     val mainDispatcherRule = MainDispatcherRule()
 
     private lateinit var sendQueue: SendQueueRepository
-    private val sentScenarios = mutableListOf<ScenarioCommand>()
     private val sentBatches = mutableListOf<List<SendQueueItem>>()
 
     @Before
     fun setUp() {
         sendQueue = SendQueueRepository()
-        sentScenarios.clear()
         sentBatches.clear()
     }
 
@@ -49,10 +47,6 @@ class SendViewModelTest {
         connectionStatus: Flow<Boolean> = flowOf(true),
     ): SendViewModel = SendViewModel(
         sendQueue = sendQueue,
-        scenarioSender = { command ->
-            sentScenarios += command
-            SendItemStatus.ACKED_OK
-        },
         batchSender = { items, onStatusChange ->
             sentBatches += items
             // Stand-in for the engine's per-item terminal callbacks.
@@ -272,39 +266,42 @@ class SendViewModelTest {
         assertEquals(7, viewModel.uiState.value.items.single().frameCount)
     }
 
-    // --- Preset scenarios ---------------------------------------------------
-
     @Test
-    fun eachPresetSendsItsScenarioCommand() {
+    fun clearQueueDropsEveryItemAndUpdatesUiState() {
         val viewModel = newViewModel()
+        sendQueue.enqueue(0xA, 1, 1)
+        sendQueue.enqueue(0xB, 2, 2)
+        assertTrue(viewModel.uiState.value.canClearQueue)
 
-        PresetScenario.entries.forEach(viewModel::sendPreset)
+        viewModel.clearQueue()
 
-        assertEquals(
-            listOf('r', 's', 'z', 'p', 'x', 'd'),
-            sentScenarios.map { it.commandChar },
-        )
-        assertEquals(
-            listOf(
-                ScenarioCommand(ScenarioCommand.STALE_REPLAY),
-                ScenarioCommand(ScenarioCommand.SYNTHETIC_STALE),
-                ScenarioCommand(ScenarioCommand.ZERO_HOP),
-                ScenarioCommand(ScenarioCommand.PLAINTEXT_COUNTER),
-                ScenarioCommand(ScenarioCommand.RANDOM_HOP),
-                ScenarioCommand(ScenarioCommand.DIFFERENT_SERIAL),
-            ),
-            sentScenarios,
-        )
+        assertTrue(sendQueue.items.value.isEmpty())
+        assertTrue(viewModel.uiState.value.items.isEmpty())
+        assertFalse(viewModel.uiState.value.canClearQueue)
+        assertFalse(viewModel.uiState.value.canSendAll)
     }
 
     @Test
-    fun staleReplayPresetUsesTheProtocolConstant() {
-        val viewModel = newViewModel()
+    fun clearQueueIsRefusedWhileABatchIsSending() {
+        val gate = CompletableDeferred<Unit>()
+        val viewModel = SendViewModel(
+            sendQueue = sendQueue,
+            batchSender = { _, _ -> gate.await() },
+            connectionStatus = flowOf(true),
+        )
+        val item = sendQueue.enqueue(0xA, 1, 1)
 
-        viewModel.sendPreset(PresetScenario.STALE_REPLAY)
+        viewModel.sendAll()
+        viewModel.clearQueue()
 
-        assertEquals(ScenarioCommand('r'), sentScenarios.single())
-        assertTrue(viewModel.uiState.value.message!!.contains("ACKed OK"))
+        assertEquals(listOf(item), sendQueue.items.value)
+        assertEquals(listOf(item), viewModel.uiState.value.items)
+        assertTrue(
+            viewModel.uiState.value.message!!.contains("Can't clear the queue"),
+        )
+
+        // Let the batch finish so no coroutine outlives the test.
+        gate.complete(Unit)
     }
 
     // --- Session-8 stub seams ----------------------------------------------
@@ -348,16 +345,6 @@ class SendViewModelTest {
         viewModel.sendAll()
 
         assertTrue(sentBatches.isEmpty())
-        assertEquals(SendViewModel.NOT_CONNECTED_MESSAGE, viewModel.uiState.value.message)
-    }
-
-    @Test
-    fun presetScenarioIsRefusedWhileDisconnected() {
-        val viewModel = newViewModel(connectionStatus = flowOf(false))
-
-        viewModel.sendPreset(PresetScenario.STALE_REPLAY)
-
-        assertTrue(sentScenarios.isEmpty())
         assertEquals(SendViewModel.NOT_CONNECTED_MESSAGE, viewModel.uiState.value.message)
     }
 
@@ -429,18 +416,5 @@ class SendViewModelTest {
         assertTrue(message.contains("1 timed out"))
         assertTrue(message.contains("1 link error"))
         assertTrue(message.contains("1 not sent"))
-    }
-
-    @Test
-    fun scenarioSenderFailureIsReportedWithoutCrashing() {
-        val viewModel = SendViewModel(
-            sendQueue = sendQueue,
-            scenarioSender = { throw IOException("USB device is not connected") },
-            connectionStatus = flowOf(true),
-        )
-
-        viewModel.sendPreset(PresetScenario.RANDOM_HOP)
-
-        assertTrue(viewModel.uiState.value.message!!.contains("USB link failed"))
     }
 }

@@ -27,7 +27,6 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -47,7 +46,6 @@ import com.eelab.rflab.queue.SendQueueItem
 import com.eelab.rflab.send.BatchSendEngine
 import com.eelab.rflab.send.SendGraph
 import com.eelab.rflab.ui.send.ManualEntryState
-import com.eelab.rflab.ui.send.PresetScenario
 import com.eelab.rflab.ui.send.SendUiState
 import com.eelab.rflab.ui.send.SendViewModel
 import com.eelab.rflab.usb.RfLabSession
@@ -56,20 +54,19 @@ import java.util.Locale
 /**
  * Send queue and manual-entry screen.
  *
- * The screen renders the shared queue, lets the user add/remove/reorder items
- * and edit each item's frame count, adds the four-field manual-entry card and
- * the six preset scenario buttons.
+ * The screen renders the shared queue, lets the user add/remove/reorder items,
+ * edit each item's frame count and clear the queue, and adds the four-field
+ * manual-entry card.
  *
- * Both send actions go through the app's single [BatchSendEngine] (via
- * [SendGraph]): "Send All" walks the queue strictly one item at a time,
- * awaiting each ACK or timeout before writing the next, and preset buttons
- * send a one-shot `SCENARIO_COMMAND` through the same serialised path.
+ * "Send All" goes through the app's single [BatchSendEngine] (via
+ * [SendGraph]): it walks the queue strictly one item at a time, awaiting each
+ * ACK or timeout before writing the next.
  *
- * Both actions are gated on [RfLabSession.isConnected], which follows the
+ * The send action is gated on [RfLabSession.isConnected], which follows the
  * session's live connection state *and* a link that fails on its own (the
- * read loop's `openState`). Queue editing still works offline; "Send All" and
- * the preset buttons are disabled and explain why when the Connect tab has no
- * live connection.
+ * read loop's `openState`). Queue editing and clearing still work offline;
+ * "Send All" is disabled and explains why when the Connect tab has no live
+ * connection.
  *
  * @param sendEngine sequential sender supplied by the app composition root.
  */
@@ -79,7 +76,6 @@ fun SendScreen(
     sendEngine: BatchSendEngine = SendGraph.engine,
     viewModel: SendViewModel = viewModel(
         factory = SendViewModel.factory(
-            scenarioSender = sendEngine::sendScenario,
             batchSender = sendEngine::sendBatch,
             connectionStatus = RfLabSession.isConnected,
         ),
@@ -94,12 +90,12 @@ fun SendScreen(
         onButtonChange = viewModel::onButtonChange,
         onFramesChange = viewModel::onFramesChange,
         onAddManualEntry = { viewModel.addManualEntry() },
-        onPresetScenario = viewModel::sendPreset,
         onRemoveItem = viewModel::removeItem,
         onMoveItemUp = viewModel::moveItemUp,
         onMoveItemDown = viewModel::moveItemDown,
         onFrameCountChange = viewModel::setFrameCount,
         onSendAll = viewModel::sendAll,
+        onClearQueue = viewModel::clearQueue,
         modifier = modifier,
     )
 }
@@ -116,16 +112,16 @@ internal fun SendScreen(
     onButtonChange: (String) -> Unit,
     onFramesChange: (String) -> Unit,
     onAddManualEntry: () -> Unit,
-    onPresetScenario: (PresetScenario) -> Unit,
     onRemoveItem: (Long) -> Unit,
     onMoveItemUp: (Long) -> Unit,
     onMoveItemDown: (Long) -> Unit,
     onFrameCountChange: (Long, Int) -> Unit,
     onSendAll: () -> Unit,
+    onClearQueue: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxSize()) {
-        SendHeader(state)
+        SendHeader(state = state, onClearQueue = onClearQueue)
 
         LazyColumn(
             modifier = Modifier.weight(1f),
@@ -140,13 +136,6 @@ internal fun SendScreen(
                     onButtonChange = onButtonChange,
                     onFramesChange = onFramesChange,
                     onAddManualEntry = onAddManualEntry,
-                )
-            }
-
-            item(key = "presets") {
-                PresetScenarioCard(
-                    onPresetScenario = onPresetScenario,
-                    enabled = state.isConnected,
                 )
             }
 
@@ -189,7 +178,7 @@ internal fun SendScreen(
 }
 
 @Composable
-private fun SendHeader(state: SendUiState) {
+private fun SendHeader(state: SendUiState, onClearQueue: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -210,6 +199,14 @@ private fun SendHeader(state: SendUiState) {
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.primary,
             )
+            if (state.canClearQueue) {
+                IconButton(onClick = onClearQueue) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = "Clear send queue",
+                    )
+                }
+            }
         }
         state.message?.let { message ->
             Spacer(Modifier.height(4.dp))
@@ -331,70 +328,6 @@ private fun HexField(
         textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
         modifier = modifier.fillMaxWidth(),
     )
-}
-
-@Composable
-private fun PresetScenarioCard(
-    onPresetScenario: (PresetScenario) -> Unit,
-    enabled: Boolean,
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant,
-        ),
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(
-                text = "Preset scenarios",
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Text(
-                text = "Sends one SCENARIO_COMMAND and waits for its ACK.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            if (!enabled) {
-                Text(
-                    text = "Connect the board to enable preset scenarios.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
-
-            PresetScenario.entries.chunked(3).forEach { rowPresets ->
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    rowPresets.forEach { preset ->
-                        OutlinedButton(
-                            onClick = { onPresetScenario(preset) },
-                            enabled = enabled,
-                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Text(
-                                    text = preset.label,
-                                    style = MaterialTheme.typography.labelMedium,
-                                    textAlign = TextAlign.Center,
-                                )
-                                Text(
-                                    text = "'${preset.commandChar}'",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary,
-                                )
-                            }
-                        }
-                    }
-                    repeat(3 - rowPresets.size) {
-                        Spacer(Modifier.weight(1f))
-                    }
-                }
-            }
-        }
-    }
 }
 
 @Composable
