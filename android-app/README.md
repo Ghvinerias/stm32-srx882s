@@ -1,17 +1,22 @@
 # STM32 RF Lab — Android app (WIP)
 
-**Status: scaffold only.** This is session 1 of the 10-session plan in
-[`PLAN.md`](PLAN.md); the authoritative protocol and decode details live in
+**Status: protocol primitives in place** (session 2 of the 10-session plan
+in [`PLAN.md`](PLAN.md)); the authoritative protocol and decode details live in
 [`AGENT_BRIEF.md`](AGENT_BRIEF.md).
 
-There is no USB, packet, COBS/CRC or HCS301 logic yet. The app currently opens
-on a three-tab shell with placeholder **Connect**, **Receive** and **Send**
-screens.
+There is no USB transport, packet layer or HCS301 decoding yet. The app still
+opens on a three-tab shell with placeholder **Connect**, **Receive** and
+**Send** screens.
 
 ## What exists
 
 - Standard Gradle / Android Studio project, Kotlin, single `app` module.
 - Jetpack Compose + Material 3 with a `NavigationBar`/`NavHost` shell.
+- `com.eelab.rflab.protocol.Cobs` and `Crc16`: JVM-testable Kotlin ports of
+  `transport_cobs_encode` / `transport_cobs_decode` and `transport_crc16`
+  from `firmware/src/transport.c`, with unit tests under `app/src/test/`.
+  The COBS codec handles bodies only; the trailing `0x00` wire delimiter is
+  left to the transport layer (session 4).
 - `com.github.mik3y:usb-serial-for-android:3.11.0` dependency.
 - USB host feature declared, plus `res/xml/device_filter.xml` matching the lab
   board (VID `0xCAFE` / PID `0x4001`, decimal `51966` / `16385`) and an
