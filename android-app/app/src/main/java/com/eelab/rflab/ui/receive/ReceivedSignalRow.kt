@@ -14,7 +14,10 @@ import java.util.Locale
  * @property serial serial number as captured.
  * @property button button nibble, `0x0..0xF`.
  * @property repeatCount number of decodes collapsed into this row (at least 1).
- * @property selected whether the row is checked for "add to send queue".
+ * @property selectionOrder 1-based position in the ordered selection while
+ *   the row is selected for "add to send queue", or null when it is not
+ *   selected. Deselecting a row renumbers the rows selected after it, so the
+ *   numbers always stay contiguous.
  * @property captureTimestampUs device capture timestamp of the first decode,
  *   kept for diagnostics; host device timestamps are a 32-bit microsecond
  *   uptime counter, so they are not used for display or grouping.
@@ -26,9 +29,12 @@ data class ReceivedSignalRow(
     val serial: Long,
     val button: Int,
     val repeatCount: Int = 1,
-    val selected: Boolean = false,
+    val selectionOrder: Int? = null,
     val captureTimestampUs: Long = 0L,
-)
+) {
+    /** Whether the row is checked for "add to send queue". */
+    val selected: Boolean get() = selectionOrder != null
+}
 
 /**
  * Display formatting for the receive rows.

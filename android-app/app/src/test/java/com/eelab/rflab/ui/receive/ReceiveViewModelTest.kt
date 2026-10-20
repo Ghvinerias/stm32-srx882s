@@ -212,6 +212,51 @@ class ReceiveViewModelTest {
         assertTrue(sendQueue.items.value.isEmpty())
     }
 
+    @Test
+    fun addSelectedToQueueEnqueuesInSelectionOrder() = runTest {
+        val viewModel = newViewModel()
+        val signalA = signal(hopping = 0xAAAA_AAAAL)
+        val signalB = signal(hopping = 0xBBBB_BBBBL)
+        val signalC = signal(hopping = 0xCCCC_CCCCL)
+        emit(1_000, signalA)
+        emit(1_100, signalB)
+        emit(1_200, signalC)
+
+        // Rows are newest first, so this also proves display order is not
+        // what drives the queue.
+        val rowsByHopping = viewModel.uiState.value.rows.associateBy { it.hopping }
+        viewModel.toggleSelection(rowsByHopping.getValue(signalC.hopping).id)
+        viewModel.toggleSelection(rowsByHopping.getValue(signalA.hopping).id)
+        viewModel.toggleSelection(rowsByHopping.getValue(signalB.hopping).id)
+
+        val added = viewModel.addSelectedToQueue()
+
+        assertEquals(3, added)
+        assertEquals(
+            listOf(signalC.hopping, signalA.hopping, signalB.hopping),
+            sendQueue.items.value.map { it.hopping },
+        )
+        assertEquals(0, viewModel.uiState.value.selectedCount)
+    }
+
+    @Test
+    fun clearReceivedWipesRowsAndSelection() = runTest {
+        val viewModel = newViewModel()
+        emit(1_000, signal(hopping = 0xAAAA_AAAAL))
+        emit(1_100, signal(hopping = 0xBBBB_BBBBL))
+        viewModel.toggleSelection(viewModel.uiState.value.rows.first().id)
+        assertTrue(viewModel.uiState.value.canClearReceived)
+
+        viewModel.clearReceived()
+
+        val state = viewModel.uiState.value
+        assertTrue(state.rows.isEmpty())
+        assertEquals(0, state.selectedCount)
+        assertFalse(state.canAddSelected)
+        assertFalse(state.canClearReceived)
+        assertEquals("the send queue is untouched", 0, state.queueSize)
+    }
+
     // --- Transport -> decoder -> rows --------------------------------------
 
     @Test

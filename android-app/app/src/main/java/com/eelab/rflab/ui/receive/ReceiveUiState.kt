@@ -4,7 +4,9 @@ package com.eelab.rflab.ui.receive
  * Everything the receive screen renders.
  *
  * @property rows decoded signals, newest first, with repeats collapsed.
- * @property selectedCount number of rows currently checked.
+ * @property selectedCount number of rows currently selected for the send
+ *   queue; selection is capped at
+ *   [ReceivedSignalAccumulator.MAX_SELECTED_ROWS].
  * @property queueSize number of items already in the shared send queue;
  *   shown as feedback after "add to send queue".
  * @property decodeErrorCount malformed/foreign frames the transport rejected
@@ -19,4 +21,6 @@ data class ReceiveUiState(
     val decodeErrorCount: Int = 0,
 ) {
     val canAddSelected: Boolean get() = selectedCount > 0
+
+    val canClearReceived: Boolean get() = rows.isNotEmpty()
 }

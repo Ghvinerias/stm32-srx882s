@@ -1,7 +1,9 @@
 package com.eelab.rflab.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -17,11 +19,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -49,8 +52,9 @@ import java.util.Locale
  *
  * The ViewModel subscribes to the current connection's transport events,
  * decodes FRAME packets and collapses press repeats into one row each.
- * Rows can be checked (tap the row or the checkbox) and copied into the
- * shared send queue in one action.
+ * Rows can be selected (tap the row) and copied into the shared send queue
+ * in selection order; at most 15 can be selected at once, numbered 1..N.
+ * "Clear received messages" wipes the accumulated rows and the selection.
  *
  * The ViewModel is normally created once by the app composition root (so a
  * connection that is already open feeds this list immediately); with nothing
@@ -70,6 +74,7 @@ fun ReceiveScreen(
         state = state,
         onToggleSelection = viewModel::toggleSelection,
         onAddSelectedToQueue = { viewModel.addSelectedToQueue() },
+        onClearReceived = viewModel::clearReceived,
         modifier = modifier,
     )
 }
@@ -83,10 +88,11 @@ internal fun ReceiveScreen(
     state: ReceiveUiState,
     onToggleSelection: (Long) -> Unit,
     onAddSelectedToQueue: () -> Unit,
+    onClearReceived: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxSize()) {
-        ReceiveHeader(state)
+        ReceiveHeader(state = state, onClearReceived = onClearReceived)
 
         if (state.rows.isEmpty()) {
             EmptyReceiveState(modifier = Modifier.weight(1f))
@@ -115,11 +121,14 @@ internal fun ReceiveScreen(
 }
 
 @Composable
-private fun ReceiveHeader(state: ReceiveUiState) {
+private fun ReceiveHeader(
+    state: ReceiveUiState,
+    onClearReceived: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(start = 16.dp, end = 4.dp, top = 12.dp, bottom = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
@@ -154,6 +163,14 @@ private fun ReceiveHeader(state: ReceiveUiState) {
                 style = MaterialTheme.typography.labelLarge,
                 color = MaterialTheme.colorScheme.primary,
             )
+        }
+        if (state.canClearReceived) {
+            IconButton(onClick = onClearReceived) {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = "Clear received messages",
+                )
+            }
         }
     }
 }
@@ -214,14 +231,11 @@ private fun ReceivedSignalCard(
             modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Checkbox(
-                checked = row.selected,
-                onCheckedChange = { onToggleSelection(row.id) },
-            )
+            SelectionBadge(row.selectionOrder)
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .padding(start = 4.dp),
+                    .padding(start = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -247,6 +261,38 @@ private fun ReceivedSignalCard(
                     fontFamily = FontFamily.Monospace,
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun SelectionBadge(order: Int?) {
+    val shape = RoundedCornerShape(50)
+    if (order == null) {
+        // Empty circle: the whole row is tappable, and this hints at where
+        // the selection number will appear.
+        Surface(
+            shape = shape,
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+            modifier = Modifier.size(26.dp),
+        ) {}
+        return
+    }
+    Surface(
+        shape = shape,
+        color = MaterialTheme.colorScheme.primary,
+        contentColor = MaterialTheme.colorScheme.onPrimary,
+        modifier = Modifier.size(26.dp),
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = order.toString(),
+                style = MaterialTheme.typography.labelMedium,
+            )
         }
     }
 }

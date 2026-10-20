@@ -81,7 +81,11 @@ class ReceiveViewModel(
         }
     }
 
-    /** Flips the checkbox on [rowId]. */
+    /**
+     * Flips the selection on [rowId]. Selecting records the row's position in
+     * the ordered selection; selecting more than
+     * [ReceivedSignalAccumulator.MAX_SELECTED_ROWS] rows is ignored.
+     */
     fun toggleSelection(rowId: Long) {
         if (accumulator.toggleSelection(rowId)) publishRows()
     }
@@ -91,8 +95,15 @@ class ReceiveViewModel(
         if (accumulator.clearSelection()) publishRows()
     }
 
+    /** Wipes every accumulated row and the current selection. */
+    fun clearReceived() {
+        accumulator.clear()
+        publishRows()
+    }
+
     /**
-     * Copies every selected row into the shared send queue, then clears the
+     * Copies every selected row into the shared send queue in selection
+     * order (the first row selected is enqueued first), then clears the
      * selection so the same press cannot be queued twice by accident.
      *
      * @return the number of items added, 0 when nothing was selected.
