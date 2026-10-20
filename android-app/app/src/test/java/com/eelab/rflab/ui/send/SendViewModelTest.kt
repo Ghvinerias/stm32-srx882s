@@ -21,7 +21,8 @@ import org.junit.Test
  * [SendViewModel].
  *
  * The scenario and batch lambdas are captured per test, so nothing touches
- * the USB layer (which does not exist until session 8).
+ * the USB layer; session 8's sequential engine is tested separately in
+ * `BatchSendEngineTest`.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SendViewModelTest {
@@ -42,8 +43,15 @@ class SendViewModelTest {
 
     private fun newViewModel(): SendViewModel = SendViewModel(
         sendQueue = sendQueue,
-        scenarioSender = { sentScenarios += it },
-        batchSender = { sentBatches += it },
+        scenarioSender = { command ->
+            sentScenarios += command
+            SendItemStatus.ACKED_OK
+        },
+        batchSender = { items, onStatusChange ->
+            sentBatches += items
+            // Stand-in for the engine's per-item terminal callbacks.
+            items.forEach { onStatusChange(it.id, SendItemStatus.ACKED_OK) }
+        },
     )
 
     private fun fillValidEntry(
@@ -289,7 +297,7 @@ class SendViewModelTest {
         viewModel.sendPreset(PresetScenario.STALE_REPLAY)
 
         assertEquals(ScenarioCommand('r'), sentScenarios.single())
-        assertTrue(viewModel.uiState.value.message!!.contains("session 8"))
+        assertTrue(viewModel.uiState.value.message!!.contains("ACKed OK"))
     }
 
     // --- Session-8 stub seams ----------------------------------------------
@@ -303,7 +311,12 @@ class SendViewModelTest {
         viewModel.sendAll()
 
         assertEquals(listOf(listOf(first, second)), sentBatches)
-        assertTrue(viewModel.uiState.value.message!!.contains("session 8"))
+        // The injected sender's terminal callbacks reached the shared queue.
+        assertEquals(
+            listOf(SendItemStatus.ACKED_OK, SendItemStatus.ACKED_OK),
+            sendQueue.items.value.map { it.status },
+        )
+        assertTrue(viewModel.uiState.value.message!!.contains("2 ACKed OK"))
     }
 
     @Test

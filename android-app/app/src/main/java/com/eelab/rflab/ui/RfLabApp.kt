@@ -22,6 +22,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.eelab.rflab.R
+import com.eelab.rflab.send.SendGraph
 import com.eelab.rflab.ui.screens.ConnectScreen
 import com.eelab.rflab.ui.screens.ReceiveScreen
 import com.eelab.rflab.ui.screens.SendScreen
@@ -37,15 +38,20 @@ private enum class Destination(
 }
 
 /**
- * Top-level shell: three placeholder destinations with bottom navigation.
- * Session 9 does the final navigation wiring; for now the routes are
- * deliberately independent and stateless.
+ * Top-level shell: three destinations with bottom navigation.
+ *
+ * This is also the app-level composition root for the send path: one
+ * [SendGraph.engine] instance is created here and handed to the send screen,
+ * so batch sends and preset scenarios share the same serialising mutex.
+ * Session 9 does the final connection/navigation wiring.
  */
 @Composable
 fun RfLabApp() {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentDestination = backStackEntry?.destination
+    // One sequential sender for the whole app: never two commands in flight.
+    val sendEngine = SendGraph.engine
 
     Scaffold(
         bottomBar = {
@@ -79,7 +85,7 @@ fun RfLabApp() {
         ) {
             composable(Destination.Connect.route) { ConnectScreen() }
             composable(Destination.Receive.route) { ReceiveScreen() }
-            composable(Destination.Send.route) { SendScreen() }
+            composable(Destination.Send.route) { SendScreen(sendEngine = sendEngine) }
         }
     }
 }

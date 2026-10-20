@@ -1,15 +1,19 @@
 # STM32 RF Lab — Android app (WIP)
 
 **Status: protocol primitives, raw packet layer, USB transport, HCS301
-decoder and live receive screen in place** (session 6 of the 10-session
-plan in [`PLAN.md`](PLAN.md)); the authoritative protocol and decode
-details live in [`AGENT_BRIEF.md`](AGENT_BRIEF.md).
+decoder, live receive screen, send queue and the sequential batch-send
+engine are in place** (session 8 of the 10-session plan in
+[`PLAN.md`](PLAN.md)); the authoritative protocol and decode details live
+in [`AGENT_BRIEF.md`](AGENT_BRIEF.md).
 
-The **Receive** tab is now live: it decodes FRAME packets from the current
-connection, collapses press repeats into rows and can copy selected rows to
-a shared send queue. **Connect** and **Send** are still placeholders
-(sessions 9 and 7 respectively), so with no connection the receive list
-shows its empty state.
+The **Receive** tab decodes FRAME packets from the current connection,
+collapses press repeats into rows and can copy selected rows to a shared
+send queue. The **Send** tab manages that queue, supports manual entry and
+the six preset scenarios, and sends strictly one command at a time:
+each item is written, then the next ACK (or a 2 s timeout) must resolve
+before the next item starts. **Connect** is still a placeholder (session
+9), and nothing attaches a connection yet, so sends currently report a
+timeout instead of reaching hardware.
 
 ## What exists
 
@@ -76,10 +80,33 @@ shows its empty state.
     size.
   - The screen is split into a stateful wrapper plus a stateless body, so
     the row/selection/queue UI has no ViewModel or USB dependency.
-- `com.eelab.rflab.queue.SendQueueRepository` (session 6 minimum): a
-  process-wide `StateFlow<List<SendQueueItem>>` with `enqueue`, `remove` and
-  `clear`. Session 7 extends the item model (frame count, manual entry) and
-  renders it; session 8 sends it.
+- `com.eelab.rflab.queue.SendQueueRepository` (session 7): process-wide
+  `StateFlow<List<SendQueueItem>>` with add/remove/reorder/frame-count edit
+  and `setStatus`. Items carry `PENDING`/`SENDING`/`ACKED_OK`/
+  `ACKED_FAILED`/`TIMEOUT`.
+- `com.eelab.rflab.send.BatchSendEngine` (session 8): the strict
+  sequential send-then-await-ACK engine required by the brief's timing
+  constraint.
+  - `sendBatch(items, onStatusChange)` marks one item `SENDING`, writes
+    its encoded `TX_COMMAND`, waits for the next `for_type = 3` ACK or a
+    configurable timeout (2 s in production), reports the terminal
+    status, and only then starts the next item. It never pipelines.
+  - `sendScenario(cmd)` is the one-shot `SCENARIO_COMMAND` path, waiting
+    for `for_type = 4`.
+  - Both share one mutex, so a preset press cannot overlap a batch.
+  - Each wait subscribes to the shared event stream before writing with
+    `CoroutineStart.UNDISPATCHED`, ignores FRAME/STATUS/decode errors and
+    ACKs for the other command type, and cancels its collector on
+    resolution. Other collectors (the receive screen) are unaffected.
+  - A failed write aborts the remaining batch items (left `PENDING`) and
+    reports the failed item as `TIMEOUT`; a normal timeout continues with
+    the next item, per the brief.
+  - `SendGraph` is the composition root: it binds the engine to
+    `RfLabSession.events` and the current connection's `sendPacket`, and
+    `RfLabApp` passes the single instance to `SendScreen`/`SendViewModel`.
+  - JVM tests use a `MutableSharedFlow` fake event source and a captured
+    write function to cover prompt ACK, `accepted = 0`, timeout,
+    unrelated traffic, strict 3-item ordering, and the scenario path.
 - `com.eelab.rflab.usb.RfLabSession`: placeholder holder for the current
   `RfLabConnection`. `attach`/`detach` are unused until session 9 wires the
   Connect screen; `events` is empty while nothing is attached.
@@ -123,8 +150,12 @@ The debug APK lands in `app/build/outputs/apk/debug/`.
 - The USB-dependent parts (`UsbManager`, `CdcAcmSerialDriver`, permission
   dialog) need a real device or instrumentation; all stream/framing logic
   lives in `PacketReassembler` and is unit-tested on the JVM.
-- Sending must stay strictly sequential: one command, wait for its ACK or a
-  timeout, then the next (session 8).
+- Sending stays strictly sequential: one command, wait for its ACK or a
+  timeout, then the next. Any change to `BatchSendEngine` must preserve that
+  and the single shared instance from `SendGraph`; the ACK protocol has no
+  request id, so pipelining makes ACK attribution ambiguous. Session 10
+  should decide how much of a mid-batch disconnect to surface beyond the
+  current "abort remaining items, mark the failed write as timeout" rule.
 - Feed every received `FramePacket.pulses` to `ScaleEstimator.addFrame(...)`
   before decoding (even malformed-length frames: the reference pools their
   data cells too). Decode each frame with the estimator's current `scale`.

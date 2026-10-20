@@ -44,6 +44,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.eelab.rflab.queue.SendItemStatus
 import com.eelab.rflab.queue.SendQueueItem
+import com.eelab.rflab.send.BatchSendEngine
+import com.eelab.rflab.send.SendGraph
 import com.eelab.rflab.ui.send.ManualEntryState
 import com.eelab.rflab.ui.send.PresetScenario
 import com.eelab.rflab.ui.send.SendUiState
@@ -57,20 +59,24 @@ import java.util.Locale
  * and edit each item's frame count, adds the four-field manual-entry card and
  * the six preset scenario buttons.
  *
- * The two send actions are deliberately stubbed:
+ * Session 8 connects both send actions to the app's single
+ * [BatchSendEngine] (via [SendGraph]): "Send All" walks the queue strictly one
+ * item at a time, awaiting each ACK or timeout before writing the next, and
+ * preset buttons send a one-shot `SCENARIO_COMMAND` through the same serialised
+ * path.
  *
- * ```
- * TODO(session 8): "Send All" currently calls SendViewModel.sendAll(), whose
- * default batchSender only logs. Replace that default with the strict
- * sequential send-then-await-ACK engine.
- * TODO(session 8): preset buttons call SendViewModel.sendPreset(), whose
- * default scenarioSender only logs. Wire it to the USB SCENARIO_COMMAND path.
- * ```
+ * @param sendEngine sequential sender supplied by the app composition root.
  */
 @Composable
 fun SendScreen(
     modifier: Modifier = Modifier,
-    viewModel: SendViewModel = viewModel(factory = SendViewModel.factory()),
+    sendEngine: BatchSendEngine = SendGraph.engine,
+    viewModel: SendViewModel = viewModel(
+        factory = SendViewModel.factory(
+            scenarioSender = sendEngine::sendScenario,
+            batchSender = sendEngine::sendBatch,
+        ),
+    ),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
 
@@ -324,7 +330,7 @@ private fun PresetScenarioCard(onPresetScenario: (PresetScenario) -> Unit) {
                 style = MaterialTheme.typography.titleMedium,
             )
             Text(
-                text = "Sends a SCENARIO_COMMAND directly (session 8 stub).",
+                text = "Sends one SCENARIO_COMMAND and waits for its ACK.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -536,7 +542,7 @@ private fun SendAllBar(
                 )
             }
             Text(
-                text = "Batch engine is stubbed until session 8.",
+                text = "One at a time: each item waits for its ACK or 2 s timeout.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,

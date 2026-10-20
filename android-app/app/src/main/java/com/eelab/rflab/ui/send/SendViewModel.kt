@@ -8,8 +8,10 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.eelab.rflab.protocol.ScenarioCommand
 import com.eelab.rflab.protocol.TxCommand
+import com.eelab.rflab.queue.SendItemStatus
 import com.eelab.rflab.queue.SendQueueItem
 import com.eelab.rflab.queue.SendQueueRepository
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,24 +25,35 @@ private const val TAG = "SendViewModel"
  *
  * Session 7 owns queue management (add, remove, reorder, frame-count editing),
  * manual hopping/serial/button/frames entry and the six preset scenario
- * buttons. The two network-facing actions are injectable stubs here:
+ * buttons. Session 8 wires the two network-facing actions to the real
+ * sequential send engine:
  *
- * - [scenarioSender] receives one validated [ScenarioCommand] per preset press.
- * - [batchSender] receives a snapshot of the queue when "Send All" is pressed.
+ * - [scenarioSender] sends one validated [ScenarioCommand] and returns its
+ *   terminal status (one-shot `SCENARIO_COMMAND`, waits for `for_type = 4`).
+ * - [batchSender] drains the queue strictly one item at a time, reporting
+ *   per-item status through the callback (which updates the shared queue), and
+ *   waits for each item's ACK or timeout before writing the next.
  *
- * Both default to a logging no-op. **Session 8 replaces those defaults with
- * the real sequential send-then-await-ACK engine** that encodes through
- * `PacketCodec` and writes to `RfLabConnection`.
+ * The production wiring lives in [com.eelab.rflab.send.SendGraph] and
+ * [com.eelab.rflab.ui.RfLabApp]. Defaults stay inert so the screen can be
+ * previewed/tested without a USB link.
  *
  * @param sendQueue shared queue also filled by the receive screen.
- * @param scenarioSender stub seam for preset scenarios; session 8 supplies it.
- * @param batchSender stub seam for "Send All"; session 8 supplies it.
+ * @param scenarioSender single-shot preset sender; supplied by the app root.
+ * @param batchSender sequential batch sender; supplied by the app root.
  */
 class SendViewModel(
     private val sendQueue: SendQueueRepository = SendQueueRepository.shared,
-    private val scenarioSender: (ScenarioCommand) -> Unit = ::stubScenarioSender,
-    private val batchSender: (List<SendQueueItem>) -> Unit = ::stubBatchSender,
+    private val scenarioSender: suspend (ScenarioCommand) -> SendItemStatus =
+        ::stubScenarioSender,
+    private val batchSender: suspend (
+        List<SendQueueItem>,
+        (Long, SendItemStatus) -> Unit,
+    ) -> Unit = ::stubBatchSender,
 ) : ViewModel() {
+
+    /** Guards against two overlapping "Send All" coroutines. */
+    private var sendBatchJob: Job? = null
 
     private val _uiState = MutableStateFlow(SendUiState(items = sendQueue.items.value))
 
@@ -161,44 +174,64 @@ class SendViewModel(
         publishQueue()
     }
 
-    // --- Stubbed send actions (session 8 seams) -----------------------------
+    // --- Send actions -------------------------------------------------------
 
     /**
-     * Builds the [ScenarioCommand] for [preset] and hands it to the injected
-     * sender. Session 7's default sender only logs the request.
+     * Builds the [ScenarioCommand] for [preset] and sends it as a one-shot
+     * `SCENARIO_COMMAND`, awaiting its type-4 ACK or timeout.
+     *
+     * Runs in [viewModelScope]; the engine serialises this against any
+     * running batch so the device never sees two in-flight commands.
      */
     fun sendPreset(preset: PresetScenario) {
         val command = ScenarioCommand(preset.commandChar)
-        // TODO(session 8): default sender only logs; wire this to the USB
-        // SCENARIO_COMMAND path (COBS + 0x00 delimiter).
-        scenarioSender(command)
-        _uiState.update {
-            it.copy(
-                message = "Scenario '${preset.commandChar}' requested " +
-                    "(session 8 wires it to USB)",
-            )
+        viewModelScope.launch {
+            _uiState.update { it.copy(message = "Sending scenario '${preset.commandChar}'…") }
+            val status = scenarioSender(command)
+            _uiState.update {
+                it.copy(message = "Scenario '${preset.commandChar}': ${status.label()}")
+            }
         }
     }
 
     /**
-     * Hands the current queue to the injected batch sender.
+     * Sends the current queue strictly one item at a time.
      *
-     * TODO(session 8): replace the default [batchSender] with the strict
-     * sequential engine: send one [SendQueueItem], await its ACK or timeout,
-     * update its status, then send the next. Never pipeline.
+     * The injected batch sender performs the send-await-ACK loop and reports
+     * each item's status. Status updates go into the shared repository, so the
+     * queue collector in [init] repaints the badges as the batch progresses.
+     * A second press while a batch is active is ignored.
      */
     fun sendAll() {
         val snapshot = sendQueue.items.value
         if (snapshot.isEmpty()) return
+        if (sendBatchJob?.isActive == true) {
+            _uiState.update { it.copy(message = "Batch already running") }
+            return
+        }
 
-        // TODO(session 8): replace this stub call with the real sequential
-        // send-then-await-ACK engine. Do not pipeline items.
-        batchSender(snapshot)
-        _uiState.update {
-            it.copy(
-                message = "Send All is stubbed for session 8 " +
-                    "(${snapshot.size} item(s) waiting)",
-            )
+        sendBatchJob = viewModelScope.launch {
+            _uiState.update {
+                it.copy(message = "Sending ${snapshot.size} item(s) sequentially…")
+            }
+
+            batchSender(snapshot) { itemId, status ->
+                // The callback is also how SENDING reaches the UI before each
+                // write, so the badges track the strict one-at-a-time order.
+                sendQueue.setStatus(itemId, status)
+            }
+            publishQueue()
+
+            val sentIds = snapshot.mapTo(HashSet()) { it.id }
+            val finalItems = sendQueue.items.value.filter { it.id in sentIds }
+            val ok = finalItems.count { it.status == SendItemStatus.ACKED_OK }
+            val failed = finalItems.count { it.status == SendItemStatus.ACKED_FAILED }
+            val timedOut = finalItems.count { it.status == SendItemStatus.TIMEOUT }
+            _uiState.update {
+                it.copy(
+                    message = "Batch done: $ok ACKed OK, $failed failed, $timedOut timed out",
+                )
+            }
         }
     }
 
@@ -214,13 +247,18 @@ class SendViewModel(
 
     companion object {
         /**
-         * ViewModel factory wired to the shared queue and, for now, the
-         * logging stubs. Session 8 passes real senders here.
+         * ViewModel factory wired to the shared queue and the sequential send
+         * engine (see [com.eelab.rflab.send.SendGraph]). Tests inject their
+         * own senders.
          */
         fun factory(
             sendQueue: SendQueueRepository = SendQueueRepository.shared,
-            scenarioSender: (ScenarioCommand) -> Unit = ::stubScenarioSender,
-            batchSender: (List<SendQueueItem>) -> Unit = ::stubBatchSender,
+            scenarioSender: suspend (ScenarioCommand) -> SendItemStatus =
+                ::stubScenarioSender,
+            batchSender: suspend (
+                List<SendQueueItem>,
+                (Long, SendItemStatus) -> Unit,
+            ) -> Unit = ::stubBatchSender,
         ): ViewModelProvider.Factory = viewModelFactory {
             initializer { SendViewModel(sendQueue, scenarioSender, batchSender) }
         }
@@ -283,31 +321,33 @@ private fun Char.isHexDigit(): Boolean =
     this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
 
 /**
- * Session-7 default: log the preset request and leave the wire untouched.
- *
- * TODO(session 8): replace with
- * `RfLabConnection.send(PacketCodec.encodeScenarioCommand(command))` (COBS +
- * delimiter included at the transport layer).
+ * Fallback sender used when no engine is wired (previews, isolated tests).
+ * Reports a timeout because nothing was actually transmitted.
  */
-private fun stubScenarioSender(command: ScenarioCommand) {
-    Log.i(
-        TAG,
-        "TODO(session 8): preset scenario '${command.commandChar}' requested; " +
-            "wire this to the USB send path",
-    )
+private suspend fun stubScenarioSender(command: ScenarioCommand): SendItemStatus {
+    Log.i(TAG, "No send engine wired for scenario '${command.commandChar}'")
+    return SendItemStatus.TIMEOUT
 }
 
 /**
- * Session-7 default: "Send All" is deliberately inert.
- *
- * TODO(session 8): replace with the strict sequential send-then-await-ACK
- * engine. Send one item at a time, wait for ACK or ~2 s timeout, update the
- * item's [com.eelab.rflab.queue.SendItemStatus], then continue.
+ * Fallback batch sender used when no engine is wired. Reports each item as
+ * timed out without touching the wire, so the UI has a definite end state.
  */
-private fun stubBatchSender(items: List<SendQueueItem>) {
-    Log.i(
-        TAG,
-        "TODO(session 8): Send All pressed with ${items.size} queued item(s); " +
-            "batch engine not wired yet",
-    )
+private suspend fun stubBatchSender(
+    items: List<SendQueueItem>,
+    onStatusChange: (Long, SendItemStatus) -> Unit,
+) {
+    Log.i(TAG, "No send engine wired for a ${items.size}-item batch")
+    for (item in items) {
+        onStatusChange(item.id, SendItemStatus.TIMEOUT)
+    }
+}
+
+/** Short user-facing name for the batch status badges/messages. */
+private fun SendItemStatus.label(): String = when (this) {
+    SendItemStatus.PENDING -> "Pending"
+    SendItemStatus.SENDING -> "Sending"
+    SendItemStatus.ACKED_OK -> "ACKed OK"
+    SendItemStatus.ACKED_FAILED -> "ACKed failed"
+    SendItemStatus.TIMEOUT -> "Timeout"
 }
