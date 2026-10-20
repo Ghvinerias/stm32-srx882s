@@ -25,6 +25,8 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.eelab.rflab.R
+import com.eelab.rflab.favorites.FavoritesRepository
+import com.eelab.rflab.favorites.SharedPreferencesFavoriteStorage
 import com.eelab.rflab.send.SendGraph
 import com.eelab.rflab.ui.receive.ReceiveViewModel
 import com.eelab.rflab.ui.screens.ConnectScreen
@@ -55,6 +57,9 @@ private enum class Destination(
  *   [com.eelab.rflab.usb.RfLabSession]. Receive and Send observe that same
  *   session, so tapping Connect on the first tab immediately feeds the
  *   others.
+ * - one [FavoritesRepository], built over the app-private SharedPreferences
+ *   file, so queue favorites are shared by every visit to the Send tab and
+ *   survive process death.
  *
  * The receive ViewModel is created here rather than inside the Receive tab
  * so it starts collecting [RfLabSession.events] as soon as the process does:
@@ -74,6 +79,11 @@ fun RfLabApp() {
     val appContext = LocalContext.current.applicationContext
     // Survives recomposition and tab switches; owns no Activity reference.
     val connectPort = remember(appContext) { UsbConnectController(appContext) }
+    // One process-wide favorites store; SharedPreferences keeps it across
+    // process death, and remember keeps the same instance across tabs.
+    val favoritesRepository = remember(appContext) {
+        FavoritesRepository(SharedPreferencesFavoriteStorage.create(appContext))
+    }
     // Activity-scoped so it outlives tab navigation and decodes continuously.
     val receiveViewModel: ReceiveViewModel = viewModel(
         factory = ReceiveViewModel.factory(RfLabSession.events),
@@ -113,7 +123,12 @@ fun RfLabApp() {
         ) {
             composable(Destination.Connect.route) { ConnectScreen(port = connectPort) }
             composable(Destination.Receive.route) { ReceiveScreen(viewModel = receiveViewModel) }
-            composable(Destination.Send.route) { SendScreen(sendEngine = sendEngine) }
+            composable(Destination.Send.route) {
+                SendScreen(
+                    sendEngine = sendEngine,
+                    favoritesRepository = favoritesRepository,
+                )
+            }
         }
     }
 }

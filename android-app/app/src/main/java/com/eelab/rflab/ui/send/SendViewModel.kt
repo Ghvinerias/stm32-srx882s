@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import com.eelab.rflab.favorites.FavoritesRepository
 import com.eelab.rflab.protocol.TxCommand
 import com.eelab.rflab.queue.SendItemStatus
 import com.eelab.rflab.queue.SendQueueItem
@@ -47,6 +48,9 @@ private const val TAG = "SendViewModel"
  *   false; queue edits remain available. Production wires this from
  *   [com.eelab.rflab.usb.RfLabSession.connection]; the default keeps isolated
  *   tests/previews connected.
+ * @param favoritesRepository persisted named queue snapshots. Production wires
+ *   the SharedPreferences-backed instance from
+ *   [com.eelab.rflab.ui.RfLabApp]; tests inject an in-memory fake.
  */
 class SendViewModel(
     private val sendQueue: SendQueueRepository = SendQueueRepository.shared,
@@ -54,13 +58,19 @@ class SendViewModel(
         List<SendQueueItem>,
         (Long, SendItemStatus) -> Unit,
     ) -> Unit = ::stubBatchSender,
+    private val favoritesRepository: FavoritesRepository,
     connectionStatus: Flow<Boolean> = flowOf(true),
 ) : ViewModel() {
 
     /** Guards against two overlapping "Send All" coroutines. */
     private var sendBatchJob: Job? = null
 
-    private val _uiState = MutableStateFlow(SendUiState(items = sendQueue.items.value))
+    private val _uiState = MutableStateFlow(
+        SendUiState(
+            items = sendQueue.items.value,
+            favorites = favoritesRepository.favorites.value,
+        ),
+    )
 
     /** Queue snapshot, manual-entry form and feedback for the screen. */
     val uiState: StateFlow<SendUiState> = _uiState.asStateFlow()
@@ -70,6 +80,11 @@ class SendViewModel(
         viewModelScope.launch {
             sendQueue.items.collect { items ->
                 _uiState.update { it.copy(items = items) }
+            }
+        }
+        viewModelScope.launch {
+            favoritesRepository.favorites.collect { favorites ->
+                _uiState.update { it.copy(favorites = favorites) }
             }
         }
         viewModelScope.launch {
@@ -203,6 +218,76 @@ class SendViewModel(
         publishQueue()
     }
 
+    // --- Favorites ----------------------------------------------------------
+
+    /** Updates the save-as-favorite name field. */
+    fun onFavoriteNameChange(value: String) {
+        _uiState.update { it.copy(favoriteName = value, message = null) }
+    }
+
+    /**
+     * Saves the current queue under [name].
+     *
+     * No-ops when [name] is blank or the queue is empty: there is nothing
+     * useful to store, and the UI disables the button in both cases. Saving an
+     * existing name updates that favorite in place (see
+     * [FavoritesRepository.save]).
+     */
+    fun saveFavorite(name: String) {
+        if (name.isBlank() || sendQueue.items.value.isEmpty()) return
+
+        val favorite = favoritesRepository.save(name, sendQueue.items.value)
+        _uiState.update {
+            it.copy(
+                favorites = favoritesRepository.favorites.value,
+                favoriteName = "",
+                message = "Saved favorite \"${favorite.name}\" " +
+                    "(${favorite.items.size} item(s))",
+            )
+        }
+    }
+
+    /**
+     * Appends the favorite's commands to the current queue.
+     *
+     * Loading appends rather than replaces: the queue may already hold captured
+     * or manually entered items, and "Clear queue" is available when the user
+     * wants a blank slate first. Each item becomes a fresh
+     * [SendItemStatus.PENDING] queue entry with a new runtime id; the
+     * favorite's saved fields are never mutated by a load.
+     */
+    fun loadFavorite(id: Long) {
+        val favorite = favoritesRepository.favorites.value.firstOrNull { it.id == id } ?: return
+        favorite.items.forEach { item ->
+            sendQueue.enqueue(
+                hopping = item.hopping,
+                serial = item.serial,
+                button = item.button,
+                frameCount = item.frameCount,
+            )
+        }
+        publishQueue()
+        _uiState.update {
+            it.copy(
+                items = sendQueue.items.value,
+                message = "Appended ${favorite.items.size} item(s) from " +
+                    "\"${favorite.name}\"",
+            )
+        }
+    }
+
+    /** Deletes a saved favorite; no-op for an unknown id. */
+    fun deleteFavorite(id: Long) {
+        val favorite = favoritesRepository.favorites.value.firstOrNull { it.id == id } ?: return
+        favoritesRepository.delete(id)
+        _uiState.update {
+            it.copy(
+                favorites = favoritesRepository.favorites.value,
+                message = "Deleted favorite \"${favorite.name}\"",
+            )
+        }
+    }
+
     // --- Send actions -------------------------------------------------------
 
     /**
@@ -301,10 +386,16 @@ class SendViewModel(
                 List<SendQueueItem>,
                 (Long, SendItemStatus) -> Unit,
             ) -> Unit = ::stubBatchSender,
+            favoritesRepository: FavoritesRepository,
             connectionStatus: Flow<Boolean> = flowOf(true),
         ): ViewModelProvider.Factory = viewModelFactory {
             initializer {
-                SendViewModel(sendQueue, batchSender, connectionStatus)
+                SendViewModel(
+                    sendQueue = sendQueue,
+                    batchSender = batchSender,
+                    favoritesRepository = favoritesRepository,
+                    connectionStatus = connectionStatus,
+                )
             }
         }
     }

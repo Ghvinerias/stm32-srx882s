@@ -1,5 +1,6 @@
 package com.eelab.rflab.ui.send
 
+import com.eelab.rflab.favorites.FavoriteQueue
 import com.eelab.rflab.protocol.ScenarioCommand
 import com.eelab.rflab.queue.SendQueueItem
 
@@ -8,19 +9,27 @@ import com.eelab.rflab.queue.SendQueueItem
  *
  * @property items shared-queue snapshot, top of the send order first.
  * @property manualEntry four-field manual-entry form and its validation errors.
- * @property message short feedback line for the last add/send/clear action.
+ * @property message short feedback line for the last add/send/clear/favorite
+ *   action.
  * @property isConnected whether the shared USB session currently has a live
  *   connection. Queue editing stays available offline; sending does not.
+ * @property favorites saved queue snapshots, newest first.
+ * @property favoriteName text currently typed into the save-as-favorite field.
  */
 data class SendUiState(
     val items: List<SendQueueItem> = emptyList(),
     val manualEntry: ManualEntryState = ManualEntryState(),
     val message: String? = null,
     val isConnected: Boolean = true,
+    val favorites: List<FavoriteQueue> = emptyList(),
+    val favoriteName: String = "",
 ) {
     val canSendAll: Boolean get() = items.isNotEmpty() && isConnected
 
     val canClearQueue: Boolean get() = items.isNotEmpty()
+
+    /** Saving needs something to snapshot and a non-blank name. */
+    val canSaveFavorite: Boolean get() = items.isNotEmpty() && favoriteName.isNotBlank()
 }
 
 /**

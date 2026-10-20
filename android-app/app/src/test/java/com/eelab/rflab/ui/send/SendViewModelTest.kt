@@ -1,5 +1,8 @@
 package com.eelab.rflab.ui.send
 
+import com.eelab.rflab.favorites.FavoriteQueue
+import com.eelab.rflab.favorites.FavoriteStorage
+import com.eelab.rflab.favorites.FavoritesRepository
 import com.eelab.rflab.protocol.TxCommand
 import com.eelab.rflab.queue.SendItemStatus
 import com.eelab.rflab.queue.SendQueueItem
@@ -35,11 +38,15 @@ class SendViewModelTest {
     val mainDispatcherRule = MainDispatcherRule()
 
     private lateinit var sendQueue: SendQueueRepository
+    private lateinit var favoritesStorage: RecordingFavoriteStorage
+    private lateinit var favoritesRepository: FavoritesRepository
     private val sentBatches = mutableListOf<List<SendQueueItem>>()
 
     @Before
     fun setUp() {
         sendQueue = SendQueueRepository()
+        favoritesStorage = RecordingFavoriteStorage()
+        favoritesRepository = FavoritesRepository(favoritesStorage)
         sentBatches.clear()
     }
 
@@ -52,6 +59,7 @@ class SendViewModelTest {
             // Stand-in for the engine's per-item terminal callbacks.
             items.forEach { onStatusChange(it.id, SendItemStatus.ACKED_OK) }
         },
+        favoritesRepository = favoritesRepository,
         connectionStatus = connectionStatus,
     )
 
@@ -287,6 +295,7 @@ class SendViewModelTest {
         val viewModel = SendViewModel(
             sendQueue = sendQueue,
             batchSender = { _, _ -> gate.await() },
+            favoritesRepository = favoritesRepository,
             connectionStatus = flowOf(true),
         )
         val item = sendQueue.enqueue(0xA, 1, 1)
@@ -302,6 +311,164 @@ class SendViewModelTest {
 
         // Let the batch finish so no coroutine outlives the test.
         gate.complete(Unit)
+    }
+
+    // --- Favorites ----------------------------------------------------------
+
+    @Test
+    fun saveFavoriteSnapshotsTheQueueAndExposesItInUiState() {
+        val viewModel = newViewModel()
+        sendQueue.enqueue(0xA, 1, 1, frameCount = 3)
+        sendQueue.enqueue(0xB, 2, 2)
+
+        assertFalse(viewModel.uiState.value.canSaveFavorite)
+        viewModel.onFavoriteNameChange("Front door")
+        assertTrue(viewModel.uiState.value.canSaveFavorite)
+
+        viewModel.saveFavorite(viewModel.uiState.value.favoriteName)
+
+        val favorite = viewModel.uiState.value.favorites.single()
+        assertEquals("Front door", favorite.name)
+        assertEquals(2, favorite.items.size)
+        assertEquals(3, favorite.items.first().frameCount)
+        assertEquals("", viewModel.uiState.value.favoriteName)
+        assertTrue(viewModel.uiState.value.message!!.contains("Front door"))
+        // The snapshot reached the injected storage, not just the flow.
+        assertEquals(listOf(favorite), favoritesStorage.loadAll())
+    }
+
+    @Test
+    fun saveFavoriteNoOpsForBlankName() {
+        val viewModel = newViewModel()
+        sendQueue.enqueue(0xA, 1, 1)
+
+        viewModel.saveFavorite("   ")
+
+        assertTrue(favoritesRepository.favorites.value.isEmpty())
+        assertTrue(viewModel.uiState.value.favorites.isEmpty())
+        assertEquals(0, favoritesStorage.saveCount)
+    }
+
+    @Test
+    fun saveFavoriteNoOpsForEmptyQueue() {
+        val viewModel = newViewModel()
+
+        viewModel.saveFavorite("Front door")
+
+        assertTrue(favoritesRepository.favorites.value.isEmpty())
+        assertTrue(viewModel.uiState.value.favorites.isEmpty())
+        assertEquals(0, favoritesStorage.saveCount)
+    }
+
+    @Test
+    fun savingTheSameNameAgainUpdatesTheExistingFavorite() {
+        val viewModel = newViewModel()
+        sendQueue.enqueue(0xA, 1, 1)
+        viewModel.saveFavorite("Front door")
+        val original = viewModel.uiState.value.favorites.single()
+
+        viewModel.clearQueue()
+        sendQueue.enqueue(0xB, 2, 2)
+        sendQueue.enqueue(0xC, 3, 3)
+        viewModel.saveFavorite("Front door")
+
+        val updated = viewModel.uiState.value.favorites.single()
+        assertEquals(original.id, updated.id)
+        assertEquals(2, updated.items.size)
+        assertEquals(listOf(updated), favoritesStorage.loadAll())
+    }
+
+    @Test
+    fun loadFavoriteAppendsToTheExistingQueue() {
+        val viewModel = newViewModel()
+        sendQueue.enqueue(0xA, 1, 1, frameCount = 3)
+        sendQueue.enqueue(0xB, 2, 2)
+        viewModel.saveFavorite("Saved")
+        val favorite = viewModel.uiState.value.favorites.single()
+
+        // A different item is queued after saving; loading must not replace it.
+        viewModel.clearQueue()
+        val existing = sendQueue.enqueue(0xC, 3, 3)
+        viewModel.loadFavorite(favorite.id)
+
+        val items = sendQueue.items.value
+        assertEquals(3, items.size)
+        assertEquals(existing.id, items.first().id)
+        assertEquals(
+            favorite.items.map { Triple(it.hopping, it.serial, it.button) },
+            items.drop(1).map { Triple(it.hopping, it.serial, it.button) },
+        )
+        // Loaded entries are fresh pending queue items, not stale snapshots.
+        assertEquals(SendItemStatus.PENDING, items[1].status)
+        assertTrue(items[1].id > existing.id)
+        assertEquals(items, viewModel.uiState.value.items)
+        assertTrue(viewModel.uiState.value.message!!.contains("Appended 2 item(s)"))
+    }
+
+    @Test
+    fun loadFavoriteKeepsSavedFrameCounts() {
+        val viewModel = newViewModel()
+        sendQueue.enqueue(0xA, 1, 1, frameCount = 8)
+        viewModel.saveFavorite("Eight frames")
+        val favorite = viewModel.uiState.value.favorites.single()
+        viewModel.clearQueue()
+
+        viewModel.loadFavorite(favorite.id)
+
+        assertEquals(8, sendQueue.items.value.single().frameCount)
+    }
+
+    @Test
+    fun loadFavoriteAppendsEvenWhenTheSameQueueIsStillLoaded() {
+        val viewModel = newViewModel()
+        sendQueue.enqueue(0xA, 1, 1)
+        viewModel.saveFavorite("Duplicate me")
+        val favorite = viewModel.uiState.value.favorites.single()
+
+        viewModel.loadFavorite(favorite.id)
+
+        assertEquals(2, sendQueue.items.value.size)
+        assertEquals(2, viewModel.uiState.value.items.size)
+    }
+
+    @Test
+    fun loadUnknownFavoriteIsANoOp() {
+        val viewModel = newViewModel()
+        sendQueue.enqueue(0xA, 1, 1)
+
+        viewModel.loadFavorite(999L)
+
+        assertEquals(1, sendQueue.items.value.size)
+        assertNull(viewModel.uiState.value.message)
+    }
+
+    @Test
+    fun deleteFavoriteRemovesItFromUiStateAndStorage() {
+        val viewModel = newViewModel()
+        sendQueue.enqueue(0xA, 1, 1)
+        viewModel.saveFavorite("Front door")
+        val favorite = viewModel.uiState.value.favorites.single()
+
+        viewModel.deleteFavorite(favorite.id)
+
+        assertTrue(viewModel.uiState.value.favorites.isEmpty())
+        assertTrue(favoritesStorage.loadAll().isEmpty())
+        assertTrue(viewModel.uiState.value.message!!.contains("Deleted"))
+    }
+
+    @Test
+    fun favoritesLoadedFromStorageArePresentAtConstruction() {
+        val existing = FavoriteQueue(
+            id = 5,
+            name = "Persisted",
+            items = listOf(com.eelab.rflab.favorites.FavoriteItem(0xA, 1, 1, 5)),
+        )
+        favoritesStorage = RecordingFavoriteStorage(listOf(existing))
+        favoritesRepository = FavoritesRepository(favoritesStorage)
+
+        val viewModel = newViewModel()
+
+        assertEquals(listOf(existing), viewModel.uiState.value.favorites)
     }
 
     // --- Session-8 stub seams ----------------------------------------------
@@ -378,6 +545,7 @@ class SendViewModelTest {
                 onStatusChange(items[0].id, SendItemStatus.SENDING)
                 throw IOException("USB connection is closed")
             },
+            favoritesRepository = favoritesRepository,
             connectionStatus = flowOf(true),
         )
         sendQueue.enqueue(0xA, 1, 1)
@@ -404,6 +572,7 @@ class SendViewModelTest {
                 onStatusChange(items[2].id, SendItemStatus.FAILED)
                 // items[3] is never attempted: it stays PENDING.
             },
+            favoritesRepository = favoritesRepository,
             connectionStatus = flowOf(true),
         )
         repeat(4) { index -> sendQueue.enqueue(0xAL + index, 1, 1) }
@@ -416,5 +585,23 @@ class SendViewModelTest {
         assertTrue(message.contains("1 timed out"))
         assertTrue(message.contains("1 link error"))
         assertTrue(message.contains("1 not sent"))
+    }
+}
+
+/** In-memory persistence fake used to assert save/delete reached storage. */
+private class RecordingFavoriteStorage(
+    initial: List<FavoriteQueue> = emptyList(),
+) : FavoriteStorage {
+
+    private var stored: List<FavoriteQueue> = initial.toList()
+
+    var saveCount: Int = 0
+        private set
+
+    override fun loadAll(): List<FavoriteQueue> = stored
+
+    override fun saveAll(favorites: List<FavoriteQueue>) {
+        stored = favorites.toList()
+        saveCount++
     }
 }

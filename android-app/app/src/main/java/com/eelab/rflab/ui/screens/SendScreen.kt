@@ -30,6 +30,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -41,6 +42,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.eelab.rflab.favorites.FavoriteQueue
+import com.eelab.rflab.favorites.FavoritesRepository
 import com.eelab.rflab.queue.SendItemStatus
 import com.eelab.rflab.queue.SendQueueItem
 import com.eelab.rflab.send.BatchSendEngine
@@ -56,7 +59,8 @@ import java.util.Locale
  *
  * The screen renders the shared queue, lets the user add/remove/reorder items,
  * edit each item's frame count and clear the queue, and adds the four-field
- * manual-entry card.
+ * manual-entry card. The Favorites card saves the current queue under a name
+ * and appends a saved queue back onto the current one.
  *
  * "Send All" goes through the app's single [BatchSendEngine] (via
  * [SendGraph]): it walks the queue strictly one item at a time, awaiting each
@@ -69,14 +73,18 @@ import java.util.Locale
  * connection.
  *
  * @param sendEngine sequential sender supplied by the app composition root.
+ * @param favoritesRepository persisted favorites wired by the app composition
+ *   root; the screen only reads/updates it through the ViewModel.
  */
 @Composable
 fun SendScreen(
     modifier: Modifier = Modifier,
     sendEngine: BatchSendEngine = SendGraph.engine,
+    favoritesRepository: FavoritesRepository,
     viewModel: SendViewModel = viewModel(
         factory = SendViewModel.factory(
             batchSender = sendEngine::sendBatch,
+            favoritesRepository = favoritesRepository,
             connectionStatus = RfLabSession.isConnected,
         ),
     ),
@@ -96,6 +104,10 @@ fun SendScreen(
         onFrameCountChange = viewModel::setFrameCount,
         onSendAll = viewModel::sendAll,
         onClearQueue = viewModel::clearQueue,
+        onFavoriteNameChange = viewModel::onFavoriteNameChange,
+        onSaveFavorite = { viewModel.saveFavorite(state.favoriteName) },
+        onLoadFavorite = viewModel::loadFavorite,
+        onDeleteFavorite = viewModel::deleteFavorite,
         modifier = modifier,
     )
 }
@@ -118,6 +130,10 @@ internal fun SendScreen(
     onFrameCountChange: (Long, Int) -> Unit,
     onSendAll: () -> Unit,
     onClearQueue: () -> Unit,
+    onFavoriteNameChange: (String) -> Unit,
+    onSaveFavorite: () -> Unit,
+    onLoadFavorite: (Long) -> Unit,
+    onDeleteFavorite: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxSize()) {
@@ -165,6 +181,18 @@ internal fun SendScreen(
                         onFrameCountChange = { count -> onFrameCountChange(item.id, count) },
                     )
                 }
+            }
+
+            item(key = "favorites") {
+                FavoritesCard(
+                    name = state.favoriteName,
+                    favorites = state.favorites,
+                    canSave = state.canSaveFavorite,
+                    onNameChange = onFavoriteNameChange,
+                    onSave = onSaveFavorite,
+                    onLoad = onLoadFavorite,
+                    onDelete = onDeleteFavorite,
+                )
             }
         }
 
@@ -302,6 +330,107 @@ private fun ManualEntryCard(
                 Spacer(Modifier.width(8.dp))
                 Text("Add to queue")
             }
+        }
+    }
+}
+
+@Composable
+private fun FavoritesCard(
+    name: String,
+    favorites: List<FavoriteQueue>,
+    canSave: Boolean,
+    onNameChange: (String) -> Unit,
+    onSave: () -> Unit,
+    onLoad: (Long) -> Unit,
+    onDelete: (Long) -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "Favorites",
+                style = MaterialTheme.typography.titleMedium,
+            )
+            Text(
+                text = "Save the current queue under a name, then append it to the " +
+                    "queue again later.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            OutlinedTextField(
+                value = name,
+                onValueChange = onNameChange,
+                label = { Text("Favorite name") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(
+                    capitalization = KeyboardCapitalization.Words,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Button(
+                onClick = onSave,
+                enabled = canSave,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Save current queue as favorite")
+            }
+
+            if (favorites.isEmpty()) {
+                Text(
+                    text = "No favorites saved yet.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                for (favorite in favorites) {
+                    FavoriteRow(
+                        favorite = favorite,
+                        onLoad = { onLoad(favorite.id) },
+                        onDelete = { onDelete(favorite.id) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FavoriteRow(
+    favorite: FavoriteQueue,
+    onLoad: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = favorite.name,
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                text = when (favorite.items.size) {
+                    1 -> "1 item"
+                    else -> "${favorite.items.size} items"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        TextButton(onClick = onLoad) {
+            Text("Load")
+        }
+        IconButton(onClick = onDelete) {
+            Icon(
+                imageVector = Icons.Default.Delete,
+                contentDescription = "Delete favorite ${favorite.name}",
+            )
         }
     }
 }
