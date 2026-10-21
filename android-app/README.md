@@ -37,7 +37,7 @@ USB device
    │  bulk IN (COBS body + 0x00 delimiter)
    ▼
 usb.RfLabConnection ──► usb.PacketReassembler ──► protocol.PacketCodec ──► TransportEvent
-   (port + read loop)     (split/delim/COBS)        (CRC + layout)          │
+   (transport + loop)     (split/delim/COBS)        (CRC + layout)          │
                                                                            ├─► ui.connect.ConnectViewModel
                                                                            │     (STATUS heartbeat, diagnostics)
                                                                            ├─► ui.receive.ReceiveViewModel
@@ -52,7 +52,7 @@ usb.RfLabConnection ──► usb.PacketReassembler ──► protocol.PacketCod
 | Package | Responsibility |
 |---|---|
 | `protocol` | `Cobs` (port of `transport_cobs_encode/decode`), `Crc16` (CRC-16/CCITT-FALSE), `PacketCodec` and the packet types (`FramePacket`, `StatusPacket`, `TxCommand`, `ScenarioCommand`, `AckPacket`). Works on raw bytes after COBS decoding; the trailing `0x00` delimiter is the transport's job. |
-| `usb` | `UsbDeviceFinder` (VID `0xCAFE` / PID `0x4001`, direct `CdcAcmSerialDriver` — the pair is deliberately absent from usb-serial-for-android's prober table), `UsbPermission` (suspend permission request with a 15 s timeout), `PacketReassembler` (arbitrary chunk boundaries, resynchronises after corrupt frames), `RfLabConnection` (port + background read loop + writes), `RfLabSession` (the app-wide current connection), `ConnectPort` / `UsbConnectController` (connection-lifecycle seam). |
+| `usb` | `UsbDeviceFinder` (VID `0xCAFE` / PID `0x4001`, direct `CdcAcmSerialDriver` — the pair is deliberately absent from usb-serial-for-android's prober table), `UsbPermission` (suspend permission request with a 15 s timeout), `PacketReassembler` (arbitrary chunk boundaries, resynchronises after corrupt frames), `RfLabTransport` / `UsbSerialTransport` (byte-stream seam and its USB CDC-ACM implementation, which owns the port parameters and transfer timeouts), `RfLabConnection` (transport + background read loop + writes), `RfLabSession` (the app-wide current connection), `ConnectPort` / `UsbConnectController` (connection-lifecycle seam). |
 | `decode` | `Hcs301Decoder` and `ScaleEstimator`, exact Kotlin ports of `tools/decode_hcs301.py`, plus the measured timing constants. |
 | `queue` | `SendQueueRepository` — the process-wide `StateFlow<List<SendQueueItem>>`, ids, reorder, frame-count clamp, per-item status. |
 | `send` | `BatchSendEngine` — strict sequential send-then-await-ACK; `SendGraph` — the app's single engine instance. |

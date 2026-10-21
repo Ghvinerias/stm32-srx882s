@@ -3,7 +3,6 @@ package com.eelab.rflab.usb
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
 import com.eelab.rflab.protocol.Cobs
-import com.hoho.android.usbserial.driver.UsbSerialPort
 import java.io.Closeable
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
@@ -27,32 +26,37 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
- * One open USB serial connection to the STM32 RF lab board.
+ * One open connection to the STM32 RF lab board.
  *
- * Owns a [UsbSerialPort] claimed via usb-serial-for-android's
- * `CdcAcmSerialDriver` plus a background read coroutine that lives as long
- * as the connection. Raw device bytes go through [PacketReassembler], which
- * splits on the `0x00` delimiter and decodes packets; results are published
- * on [events].
+ * Owns an [RfLabTransport] plus a background read coroutine that lives as
+ * long as the connection. Raw device bytes go through [PacketReassembler],
+ * which splits on the `0x00` delimiter and decodes packets; results are
+ * published on [events].
  *
- * This class is the thin Android-facing shell around the protocol layer:
- * everything that can be tested without a device lives in
- * [PacketReassembler], [com.eelab.rflab.protocol.Cobs] and
- * [com.eelab.rflab.protocol.PacketCodec]. Opening, claiming, and reading
- * require a real USB host and are not unit-tested (see the hardware section
- * in `README.md`).
+ * The transport seam keeps everything above the byte stream — framing,
+ * reassembly, write serialisation, liveness flows, clean-vs-failure close —
+ * independent of how the bytes travel. USB CDC-ACM is wired up by
+ * [UsbSerialTransport] through [open]; a future Bluetooth SPP link supplies
+ * its own [RfLabTransport] and uses the generic constructor.
+ *
+ * This class is the thin shell around the protocol layer: everything that
+ * can be tested without a device lives in [PacketReassembler],
+ * [com.eelab.rflab.protocol.Cobs] and [com.eelab.rflab.protocol.PacketCodec].
+ * Opening a real transport requires hardware and is not unit-tested (see the
+ * hardware section in `README.md`).
  *
  * @see UsbDeviceFinder for locating the board.
  * @see UsbPermission for the permission flow that must succeed first.
+ * @see RfLabTransport for the byte-stream contract implementations honour.
  */
-class RfLabConnection private constructor(
-    private val port: UsbSerialPort,
+class RfLabConnection(
+    private val transport: RfLabTransport,
     private val ioDispatcher: CoroutineDispatcher,
 ) : Closeable {
 
     private val scope = CoroutineScope(SupervisorJob() + ioDispatcher)
 
-    /** Serialises writes: USB transfers must not overlap between coroutines. */
+    /** Serialises writes: transfers must not overlap between coroutines. */
     private val writeMutex = Mutex()
 
     /**
@@ -100,7 +104,7 @@ class RfLabConnection private constructor(
      * Later sessions use this for already COBS-encoded, delimiter-terminated
      * command frames; [sendPacket] is the convenience wrapper that adds that
      * framing. Writes are serialised so concurrent callers cannot interleave
-     * partial USB transfers.
+     * partial transfers on the wire.
      *
      * @throws IOException if the connection is closed or the transfer fails.
      */
@@ -109,7 +113,7 @@ class RfLabConnection private constructor(
         writeMutex.withLock {
             ensureOpen()
             withContext(ioDispatcher) {
-                port.write(bytes, WRITE_TIMEOUT_MS)
+                transport.write(bytes)
             }
         }
     }
@@ -126,8 +130,9 @@ class RfLabConnection private constructor(
     }
 
     /**
-     * Stops the read loop and releases the USB interface and device
-     * connection. Idempotent and safe to call from any thread.
+     * Stops the read loop and releases the underlying transport (for USB,
+     * the interface and device connection). Idempotent and safe to call from
+     * any thread.
      *
      * A deliberate close does not emit [TransportEvent.ConnectionLost];
      * only an unexpected I/O failure does.
@@ -136,18 +141,18 @@ class RfLabConnection private constructor(
         if (!closed.compareAndSet(false, true)) return
         _open.value = false
         scope.cancel()
-        runCatching { port.close() }
+        runCatching { transport.close() }
     }
 
     private fun ensureOpen() {
-        if (!isOpen) throw IOException("USB connection is closed")
+        if (!isOpen) throw IOException("connection is closed")
     }
 
     /**
-     * Blocking bulk reads on the IO dispatcher for the lifetime of the
+     * Blocking reads on the IO dispatcher for the lifetime of the
      * connection. A finite read timeout keeps coroutine cancellation
-     * responsive: [close] also closes the port, which aborts an in-flight
-     * transfer immediately.
+     * responsive: [close] also closes the transport, which aborts an
+     * in-flight read immediately.
      */
     private suspend fun readLoop() {
         val reassembler = PacketReassembler()
@@ -156,7 +161,7 @@ class RfLabConnection private constructor(
         try {
             while (_open.value && currentCoroutineContext().isActive) {
                 val bytesRead = try {
-                    port.read(buffer, READ_TIMEOUT_MS)
+                    transport.read(buffer)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -176,7 +181,7 @@ class RfLabConnection private constructor(
         } finally {
             _open.value = false
             if (closed.compareAndSet(false, true)) {
-                runCatching { port.close() }
+                runCatching { transport.close() }
             }
             // Also stops the scope when the reader ended on its own (I/O
             // failure); idempotent after an explicit close().
@@ -185,16 +190,7 @@ class RfLabConnection private constructor(
     }
 
     companion object {
-        /** Required by the API; irrelevant for a native USB CDC-ACM link. */
-        const val BAUD_RATE = 115200
-
-        private const val DATA_BITS = UsbSerialPort.DATABITS_8
-        private const val STOP_BITS = UsbSerialPort.STOPBITS_1
-        private const val PARITY = UsbSerialPort.PARITY_NONE
-
         private const val READ_BUFFER_BYTES = 4096
-        private const val READ_TIMEOUT_MS = 200
-        private const val WRITE_TIMEOUT_MS = 2_000
         private const val EVENT_BUFFER_CAPACITY = 64
 
         /**
@@ -204,7 +200,7 @@ class RfLabConnection private constructor(
          * The driver is constructed directly rather than through
          * `UsbSerialProber`, because the board's VID/PID is not in that
          * library's detection table. Baud/format parameters are set only
-         * because the CDC-ACM API expects them.
+         * because the CDC-ACM API expects them (see [UsbSerialTransport]).
          *
          * @throws SecurityException if permission has not been granted.
          * @throws IOException if the device cannot be opened or configured.
@@ -227,9 +223,8 @@ class RfLabConnection private constructor(
             val usbConnection = usbManager.openDevice(device)
                 ?: throw IOException("could not open USB device ${device.deviceName}")
 
-            try {
-                port.open(usbConnection)
-                port.setParameters(BAUD_RATE, DATA_BITS, STOP_BITS, PARITY)
+            val transport = try {
+                UsbSerialTransport.open(port, usbConnection)
             } catch (e: Exception) {
                 runCatching { port.close() }
                 runCatching { usbConnection.close() }
@@ -237,7 +232,7 @@ class RfLabConnection private constructor(
                 throw IOException("could not configure ${device.deviceName}", e)
             }
 
-            return RfLabConnection(port, dispatcher)
+            return RfLabConnection(transport, dispatcher)
         }
     }
 }
