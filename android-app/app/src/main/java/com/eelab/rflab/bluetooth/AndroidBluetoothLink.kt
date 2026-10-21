@@ -61,9 +61,12 @@ class AndroidBluetoothLink(context: Context) : BluetoothLink {
     /**
      * Lists bonded devices, or an empty list with no Bluetooth adapter.
      *
-     * @throws SecurityException on API 31+ without `BLUETOOTH_CONNECT`; the
-     *   controller checks the permission first and maps this to a failure.
+     * @throws SecurityException on API 31+ without `BLUETOOTH_CONNECT`; both
+     *   `bondedDevices` and `BluetoothDevice.name` need it. The Connect screen
+     *   only calls this after the runtime grant, and the controller re-checks
+     *   the permission before connecting, so lint's static check is suppressed.
      */
+    @Suppress("MissingPermission") // Callers gate this on BLUETOOTH_CONNECT first.
     override fun bondedDevices(): List<BluetoothEndpoint> {
         val adapter = adapter ?: return emptyList()
         return adapter.bondedDevices.orEmpty().map { device ->
