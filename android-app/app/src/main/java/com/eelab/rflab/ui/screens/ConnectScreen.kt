@@ -1,5 +1,9 @@
 package com.eelab.rflab.ui.screens
 
+import android.Manifest
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -20,64 +25,259 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.eelab.rflab.bluetooth.BluetoothConnectController
+import com.eelab.rflab.bluetooth.BluetoothEndpoint
+import com.eelab.rflab.bluetooth.BluetoothLink
+import com.eelab.rflab.ui.connect.ConnectTransport
 import com.eelab.rflab.ui.connect.ConnectUiState
 import com.eelab.rflab.ui.connect.ConnectViewModel
 import com.eelab.rflab.ui.connect.ConnectionPhase
+import com.eelab.rflab.ui.connect.ESP32_BOARD_NAME
 import com.eelab.rflab.ui.connect.LinkLiveness
 import com.eelab.rflab.ui.connect.StatusDiagnostics
+import com.eelab.rflab.ui.connect.connectFooterHint
+import com.eelab.rflab.ui.connect.connectMessage
+import com.eelab.rflab.ui.connect.connectPhaseLabel
+import com.eelab.rflab.ui.connect.connectStatusDetail
+import com.eelab.rflab.ui.connect.preselectedBluetoothAddress
 import com.eelab.rflab.usb.ConnectPort
 import java.util.Locale
 
 /**
- * USB connection screen.
+ * Connect screen with a transport chooser (USB default, Bluetooth opt-in).
  *
- * The permission/connect button drives the real lifecycle through
- * [ConnectPort] (`UsbConnectController` in production): find the board,
- * request USB permission, open the CDC-ACM port and attach it to the shared
- * session. A colored dot and the STATUS heartbeat (fresh/stale, 3 s
- * threshold) show whether the link is actually alive, and the optional
- * clock/edge diagnostics from STATUS are shown once the first heartbeat
- * arrives.
+ * The app can reach the board over USB CDC-ACM (STM32) or Bluetooth Classic
+ * SPP / RFCOMM (the ESP32 build). Both are
+ * [ConnectPort][com.eelab.rflab.usb.ConnectPort]s that attach to the same
+ * [com.eelab.rflab.usb.RfLabSession], and everything above the port — the
+ * phase machine, the ~1/s STATUS heartbeat, the diagnostics card, the stream
+ * Receive/Send observe — is transport-agnostic, so it is reused unchanged.
+ * Only the port and the copy that names a transport are swapped.
  *
- * @param port connection seam supplied by the app composition root.
+ * This stateful wrapper owns just the per-visit UI state:
+ *
+ * - the selected [ConnectTransport], kept in [rememberSaveable] so a tab
+ *   switch does not lose it, and defaulting to [ConnectTransport.USB] so the
+ *   existing USB flow is still one tap;
+ * - the `BLUETOOTH_CONNECT` grant. On API 31+ it is requested at runtime via
+ *   [rememberLauncherForActivityResult]; below 31 the legacy `BLUETOOTH`
+ *   permissions are install-time grants and
+ *   [BluetoothLink.isConnectPermissionGranted] reports true, so no launcher
+ *   fires. All `Build.VERSION_CODES.S` handling is behind an SDK check.
+ * - the bonded-device list and the selected MAC. The list is re-read when the
+ *   grant changes, when the Bluetooth transport is (re-)entered, and on the
+ *   picker's Refresh button — pairing happens in Android Settings, so the
+ *   screen cannot be notified from here.
+ *
+ * One [ConnectViewModel] is kept per transport: a single USB one, plus one
+ * Bluetooth one per selected address, keyed by the MAC because
+ * [BluetoothConnectController] fixes its target at construction time. The key
+ * only changes while disconnected (the selector is disabled during
+ * CONNECTING/CONNECTED), so a picker tap can never orphan a live socket.
+ *
+ * @param usbPort USB connection seam built by the app composition root
+ *   ([com.eelab.rflab.usb.UsbConnectController]).
+ * @param bluetoothLink Bluetooth seam built by the app composition root
+ *   ([com.eelab.rflab.bluetooth.AndroidBluetoothLink]). The screen reads the
+ *   bonded list from it and builds a per-address controller; it never opens a
+ *   socket itself.
  */
 @Composable
 fun ConnectScreen(
-    port: ConnectPort,
+    usbPort: ConnectPort,
+    bluetoothLink: BluetoothLink,
     modifier: Modifier = Modifier,
-    viewModel: ConnectViewModel = viewModel(factory = ConnectViewModel.factory(port)),
 ) {
-    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    var transport by rememberSaveable { mutableStateOf(ConnectTransport.USB) }
+
+    // USB has one fixed controller, so one ViewModel is enough. The explicit
+    // key keeps it distinct from the per-device Bluetooth ViewModels below.
+    val usbViewModel: ConnectViewModel = viewModel(
+        key = USB_VIEW_MODEL_KEY,
+        factory = ConnectViewModel.factory(usbPort),
+    )
+    val usbState by usbViewModel.uiState.collectAsStateWithLifecycle()
+
+    // API 31+ asks for BLUETOOTH_CONNECT at runtime; below that the grant is
+    // install-time and the link reports it as present. The launcher is cheap
+    // to remember on every API level, we simply never fire it below 31.
+    val runtimePermissionRequired = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    var bluetoothPermissionGranted by remember {
+        mutableStateOf(bluetoothLink.isConnectPermissionGranted())
+    }
+    var bondedDevices by remember { mutableStateOf<List<BluetoothEndpoint>?>(null) }
+    var bondedRevision by remember { mutableIntStateOf(0) }
+    var selectedBluetoothAddress by rememberSaveable { mutableStateOf<String?>(null) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        // The answer is authoritative: re-read the list either way (it is
+        // empty before the grant) so the picker reflects reality.
+        bluetoothPermissionGranted = granted
+        bondedRevision++
+    }
+
+    LaunchedEffect(transport, bluetoothPermissionGranted, bondedRevision) {
+        if (transport != ConnectTransport.BLUETOOTH) return@LaunchedEffect
+        if (!bluetoothPermissionGranted) {
+            bondedDevices = emptyList()
+            return@LaunchedEffect
+        }
+
+        val devices = try {
+            bluetoothLink.bondedDevices()
+        } catch (revoked: SecurityException) {
+            // The grant was revoked in Settings while we were paused; go back
+            // to the rationale + grant button instead of crashing.
+            bluetoothPermissionGranted = false
+            emptyList()
+        }
+
+        bondedDevices = devices
+        // Keep a still-paired manual choice, otherwise fall back to the ESP32
+        // board's name, otherwise leave it unselected for the user to tap.
+        selectedBluetoothAddress =
+            preselectedBluetoothAddress(devices, selectedBluetoothAddress)
+    }
+
+    val targetAddress = selectedBluetoothAddress
+    val bluetoothViewModel: ConnectViewModel? =
+        if (transport == ConnectTransport.BLUETOOTH && targetAddress != null) {
+            // One controller/ViewModel per target: BluetoothConnectController
+            // takes the MAC in its constructor. viewModel(key = …) returns the
+            // same instance while the address is unchanged and builds a fresh
+            // one when the user picks another device (only possible while
+            // disconnected).
+            viewModel(
+                key = BLUETOOTH_VIEW_MODEL_KEY_PREFIX + targetAddress,
+                factory = ConnectViewModel.factory(
+                    remember(targetAddress) {
+                        BluetoothConnectController(bluetoothLink, targetAddress)
+                    },
+                ),
+            )
+        } else {
+            null
+        }
+
+    val bluetoothState: ConnectUiState = if (bluetoothViewModel != null) {
+        val state by bluetoothViewModel.uiState.collectAsStateWithLifecycle()
+        state
+    } else {
+        // No device picked yet: show the neutral disconnected card. Connect is
+        // disabled, so this never implies an active link.
+        ConnectUiState()
+    }
+
+    val activeState = when (transport) {
+        ConnectTransport.USB -> usbState
+        ConnectTransport.BLUETOOTH -> bluetoothState
+    }
+    val activeViewModel =
+        if (transport == ConnectTransport.USB) usbViewModel else bluetoothViewModel
+
+    // Only switch while idle: canDisconnect is exactly CONNECTING/CONNECTED,
+    // i.e. a link is opening or live and must be closed by the user first.
+    val transportSwitchEnabled = !activeState.canDisconnect
+
+    val bluetoothReady = bluetoothPermissionGranted && targetAddress != null
+    val connectEnabled = when (transport) {
+        ConnectTransport.USB -> true
+        ConnectTransport.BLUETOOTH -> bluetoothReady
+    }
 
     ConnectScreen(
-        state = state,
-        onConnect = viewModel::connect,
-        onDisconnect = viewModel::disconnect,
+        transport = transport,
+        state = activeState,
+        onTransportChange = { chosen ->
+            // Guard the state too, not just the disabled buttons, so a stray
+            // event cannot swap the port out from under an open connection.
+            if (transportSwitchEnabled) transport = chosen
+        },
+        onConnect = { activeViewModel?.connect() },
+        onDisconnect = { activeViewModel?.disconnect() },
         modifier = modifier,
+        transportSwitchEnabled = transportSwitchEnabled,
+        connectEnabled = connectEnabled,
+        transportContent = if (transport == ConnectTransport.BLUETOOTH) {
+            {
+                BluetoothDevicePicker(
+                    runtimePermissionRequired = runtimePermissionRequired,
+                    permissionGranted = bluetoothPermissionGranted,
+                    devices = bondedDevices,
+                    selectedAddress = targetAddress,
+                    onGrantPermission = {
+                        if (runtimePermissionRequired) {
+                            permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                        }
+                    },
+                    onSelect = { device -> selectedBluetoothAddress = device.address },
+                    onRefresh = {
+                        // Also re-check the grant: the user may have come back
+                        // from Settings after enabling Nearby devices.
+                        bluetoothPermissionGranted =
+                            bluetoothLink.isConnectPermissionGranted()
+                        bondedRevision++
+                    },
+                )
+            }
+        } else {
+            null
+        },
     )
 }
 
 /**
  * Stateless body, kept separate so the status/diagnostic UI can be previewed
- * or exercised without a ViewModel or a USB device.
+ * or exercised without a ViewModel, a USB device or a Bluetooth adapter.
+ *
+ * Transport-specific extras (the Bluetooth picker) arrive as
+ * [transportContent] and are only rendered between the selector and the
+ * status card, so the shared card/controls/error/footer layout is identical on
+ * both transports.
+ *
+ * @param transport active transport; only drives wording and the selector.
+ * @param state phase/heartbeat/diagnostics of the active transport's port.
+ * @param transportSwitchEnabled false while a link is CONNECTING/CONNECTED.
+ * @param connectEnabled false when the active transport is not ready to
+ *   connect yet (Bluetooth without a grant or without a selected device).
+ * @param transportContent extra body for the active transport, if any.
  */
 @Composable
 internal fun ConnectScreen(
+    transport: ConnectTransport,
     state: ConnectUiState,
+    onTransportChange: (ConnectTransport) -> Unit,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     modifier: Modifier = Modifier,
+    transportSwitchEnabled: Boolean = true,
+    connectEnabled: Boolean = true,
+    transportContent: (@Composable () -> Unit)? = null,
 ) {
     Column(
         modifier = modifier
@@ -91,7 +291,24 @@ internal fun ConnectScreen(
             style = MaterialTheme.typography.titleLarge,
         )
 
-        ConnectionStatusCard(state)
+        TransportSelector(
+            transport = transport,
+            onTransportChange = onTransportChange,
+            enabled = transportSwitchEnabled,
+        )
+
+        if (!transportSwitchEnabled) {
+            Text(
+                text = "Disconnect the ${transport.displayName} link before " +
+                    "switching transports.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        transportContent?.invoke()
+
+        ConnectionStatusCard(state = state, transport = transport)
 
         if (state.isConnected) {
             DiagnosticsCard(state.diagnostics)
@@ -99,11 +316,12 @@ internal fun ConnectScreen(
 
         ConnectionControls(
             state = state,
+            connectEnabled = connectEnabled,
             onConnect = onConnect,
             onDisconnect = onDisconnect,
         )
 
-        state.message?.let { message ->
+        connectMessage(state, transport)?.let { message ->
             Surface(
                 color = MaterialTheme.colorScheme.errorContainer,
                 contentColor = MaterialTheme.colorScheme.onErrorContainer,
@@ -119,16 +337,227 @@ internal fun ConnectScreen(
         }
 
         Text(
-            text = "Plug the board in over USB OTG. Android asks for permission the " +
-                "first time; the grant is reused until the device is unplugged.",
+            text = connectFooterHint(transport),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
 
+/**
+ * Two-option USB / Bluetooth selector.
+ *
+ * Disabled as a whole while a link is CONNECTING/CONNECTED: the app has one
+ * shared session, so switching transports means tearing the live link down,
+ * and that is the user's explicit choice (Disconnect), never a side effect of
+ * a tab tap.
+ */
 @Composable
-private fun ConnectionStatusCard(state: ConnectUiState) {
+private fun TransportSelector(
+    transport: ConnectTransport,
+    onTransportChange: (ConnectTransport) -> Unit,
+    enabled: Boolean,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text(
+            text = "Transport",
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            // Plain for-loop: minSdk is 23 and the app avoids API 24+ stdlib
+            // extensions (see the same note in RfLabApp.kt).
+            for (option in ConnectTransport.entries) {
+                SegmentedButton(
+                    selected = option == transport,
+                    onClick = { onTransportChange(option) },
+                    enabled = enabled,
+                    shape = SegmentedButtonDefaults.itemShape(
+                        index = option.ordinal,
+                        count = ConnectTransport.entries.size,
+                    ),
+                ) {
+                    Text(option.displayName)
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Bluetooth-only body: permission rationale, bonded-device list, selection.
+ *
+ * Stateless on purpose — the wrapper owns the grant/list/selection state, so
+ * this card can be previewed in every combination (permission missing, no
+ * bonded devices, a few devices, one selected).
+ *
+ * Only *bonded* devices are listed: the app never scans, which is also why it
+ * needs no location permission. The expected board advertises as
+ * [ESP32_BOARD_NAME]; when several devices are paired the user's tap decides,
+ * and the MAC shown under each name is the identity actually connected to.
+ *
+ * @param runtimePermissionRequired true on API 31+, where
+ *   `BLUETOOTH_CONNECT` is a runtime grant.
+ * @param permissionGranted result of the last grant check/launcher answer.
+ * @param devices bonded devices, or null while the first read is in flight.
+ * @param selectedAddress currently targeted MAC, if any.
+ * @param onGrantPermission launches the runtime permission request.
+ * @param onSelect sets the target device.
+ * @param onRefresh re-checks the grant and re-reads the bonded list (pairing
+ *   happens in Android Settings, so this is the only way back).
+ */
+@Composable
+internal fun BluetoothDevicePicker(
+    runtimePermissionRequired: Boolean,
+    permissionGranted: Boolean,
+    devices: List<BluetoothEndpoint>?,
+    selectedAddress: String?,
+    onGrantPermission: () -> Unit,
+    onSelect: (BluetoothEndpoint) -> Unit,
+    onRefresh: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "Bluetooth device",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onRefresh) {
+                    Text("Refresh")
+                }
+            }
+
+            if (!permissionGranted) {
+                Text(
+                    text = if (runtimePermissionRequired) {
+                        "Bluetooth permission is needed to list paired devices " +
+                            "and connect. Android 12 and newer shows this as " +
+                            "\"Nearby devices\"."
+                    } else {
+                        "Bluetooth permission is missing even though it is an " +
+                            "install-time grant; reinstall the app to restore it."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (runtimePermissionRequired) {
+                    Button(
+                        onClick = onGrantPermission,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Allow Bluetooth access")
+                    }
+                    Text(
+                        text = "If no dialog appears, enable Nearby devices for " +
+                            "this app in Android Settings, then tap Refresh.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                return@Column
+            }
+
+            when {
+                devices == null -> Text(
+                    text = "Reading paired devices…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                devices.isEmpty() -> Text(
+                    text = "No paired devices found. Pair the board in Android " +
+                        "Settings → Bluetooth; it advertises as " +
+                        "$ESP32_BOARD_NAME, then tap Refresh.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                else -> {
+                    Text(
+                        text = "Paired devices",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    for (device in devices) {
+                        BluetoothDeviceRow(
+                            device = device,
+                            selected = device.address == selectedAddress,
+                            onSelect = { onSelect(device) },
+                        )
+                    }
+                    if (selectedAddress == null) {
+                        Text(
+                            text = "Select a device to enable Connect.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One selectable bonded device: radio dot, name (or address when the device
+ * has none) and the MAC in monospace.
+ *
+ * The whole row is the tap target so the MAC is easy to read while picking;
+ * the radio's own click is nulled to avoid a double toggle.
+ */
+@Composable
+private fun BluetoothDeviceRow(
+    device: BluetoothEndpoint,
+    selected: Boolean,
+    onSelect: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .selectable(
+                selected = selected,
+                role = Role.RadioButton,
+                onClick = onSelect,
+            )
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(
+            selected = selected,
+            onClick = null,
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                text = device.name ?: "Unnamed device",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                text = device.address,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ConnectionStatusCard(
+    state: ConnectUiState,
+    transport: ConnectTransport,
+) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -149,10 +578,10 @@ private fun ConnectionStatusCard(state: ConnectUiState) {
             Spacer(Modifier.width(12.dp))
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
-                    text = phaseLabel(state.phase),
+                    text = connectPhaseLabel(state.phase, transport),
                     style = MaterialTheme.typography.titleMedium,
                 )
-                statusDetail(state)?.let { detail ->
+                connectStatusDetail(state, transport)?.let { detail ->
                     Text(
                         text = detail,
                         style = MaterialTheme.typography.bodySmall,
@@ -217,6 +646,7 @@ private fun DiagnosticRow(label: String, value: String) {
 @Composable
 private fun ConnectionControls(
     state: ConnectUiState,
+    connectEnabled: Boolean,
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
@@ -250,6 +680,9 @@ private fun ConnectionControls(
             else -> {
                 Button(
                     onClick = onConnect,
+                    // Bluetooth needs its grant and a picked device first; USB
+                    // is always ready. The picker above says what is missing.
+                    enabled = connectEnabled,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text(
@@ -286,34 +719,10 @@ private fun statusColor(state: ConnectUiState): Color = when {
     else -> MaterialTheme.colorScheme.onSurfaceVariant
 }
 
-private fun phaseLabel(phase: ConnectionPhase): String = when (phase) {
-    ConnectionPhase.DISCONNECTED -> "Disconnected"
-    ConnectionPhase.CONNECTING -> "Connecting…"
-    ConnectionPhase.PERMISSION_DENIED -> "USB permission denied"
-    ConnectionPhase.CONNECTED -> "Connected"
-    ConnectionPhase.ERROR -> "Connection error"
-}
-
-private fun statusDetail(state: ConnectUiState): String? = when (state.phase) {
-    ConnectionPhase.CONNECTING ->
-        "Looking for the board and requesting USB permission…"
-
-    ConnectionPhase.CONNECTED -> when (state.liveness) {
-        LinkLiveness.WAITING -> "Waiting for the first STATUS heartbeat…"
-        LinkLiveness.LIVE ->
-            "Heartbeat OK — last STATUS ${formatAge(state.lastStatusAgeMs)} ago"
-
-        LinkLiveness.STALE ->
-            "No STATUS for ${formatAge(state.lastStatusAgeMs)} — link may be down"
-    }
-
-    else -> null
-}
-
-private fun formatAge(ageMs: Long?): String = when {
-    ageMs == null -> "unknown"
-    ageMs < 1_000L -> "$ageMs ms"
-    else -> String.format(Locale.US, "%.1f s", ageMs / 1_000.0)
-}
-
 private fun formatCount(value: Long): String = String.format(Locale.US, "%,d", value)
+
+/** Stable ViewModel-store key for the single USB ViewModel. */
+private const val USB_VIEW_MODEL_KEY: String = "connect-usb"
+
+/** Prefix for the per-address Bluetooth ViewModels (MAC appended). */
+private const val BLUETOOTH_VIEW_MODEL_KEY_PREFIX: String = "connect-bluetooth:"

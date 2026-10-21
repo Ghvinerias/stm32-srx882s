@@ -25,6 +25,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.eelab.rflab.R
+import com.eelab.rflab.bluetooth.AndroidBluetoothLink
 import com.eelab.rflab.favorites.FavoritesRepository
 import com.eelab.rflab.favorites.SharedPreferencesFavoriteStorage
 import com.eelab.rflab.send.SendGraph
@@ -57,6 +58,12 @@ private enum class Destination(
  *   [com.eelab.rflab.usb.RfLabSession]. Receive and Send observe that same
  *   session, so tapping Connect on the first tab immediately feeds the
  *   others.
+ * - one [AndroidBluetoothLink], the Android side of the Bluetooth SPP
+ *   transport. The Connect screen reads the bonded-device list through it and
+ *   builds its per-device
+ *   [com.eelab.rflab.bluetooth.BluetoothConnectController] from it, so both
+ *   transports end up attaching the same [RfLabSession]. Nothing here depends
+ *   on which transport is live: Receive and Send are transport-agnostic.
  * - one [FavoritesRepository], built over the app-private SharedPreferences
  *   file, so queue favorites are shared by every visit to the Send tab and
  *   survive process death.
@@ -67,7 +74,9 @@ private enum class Destination(
  * and queued in the list instead of being missed.
  *
  * Only the application context is retained: USB permission uses a
- * `PendingIntent` broadcast and does not require the Activity.
+ * `PendingIntent` broadcast, and the Bluetooth `BLUETOOTH_CONNECT` grant is
+ * requested by the Connect screen's own activity-result launcher. Neither
+ * needs an Activity reference held here.
  */
 @Composable
 fun RfLabApp() {
@@ -78,7 +87,11 @@ fun RfLabApp() {
     val sendEngine = SendGraph.engine
     val appContext = LocalContext.current.applicationContext
     // Survives recomposition and tab switches; owns no Activity reference.
-    val connectPort = remember(appContext) { UsbConnectController(appContext) }
+    val usbConnectPort = remember(appContext) { UsbConnectController(appContext) }
+    // The Bluetooth seam: same application context, no Activity retained. The
+    // Connect screen picks the bonded device and builds a controller per
+    // address from this, mirroring how UsbConnectController owns USB.
+    val bluetoothLink = remember(appContext) { AndroidBluetoothLink(appContext) }
     // One process-wide favorites store; SharedPreferences keeps it across
     // process death, and remember keeps the same instance across tabs.
     val favoritesRepository = remember(appContext) {
@@ -121,7 +134,12 @@ fun RfLabApp() {
             startDestination = Destination.Connect.route,
             modifier = Modifier.padding(innerPadding),
         ) {
-            composable(Destination.Connect.route) { ConnectScreen(port = connectPort) }
+            composable(Destination.Connect.route) {
+                ConnectScreen(
+                    usbPort = usbConnectPort,
+                    bluetoothLink = bluetoothLink,
+                )
+            }
             composable(Destination.Receive.route) { ReceiveScreen(viewModel = receiveViewModel) }
             composable(Destination.Send.route) {
                 SendScreen(
