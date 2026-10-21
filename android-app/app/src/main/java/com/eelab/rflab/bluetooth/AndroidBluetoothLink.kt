@@ -26,12 +26,16 @@ import java.io.IOException
  * ### Permission model
  *
  * On API 31+ `BLUETOOTH_CONNECT` is a runtime permission required for
- * `bondedDevices`, `BluetoothDevice.name`, `createRfcommSocketToServiceRecord`
- * and `cancelDiscovery`. Below 31 the legacy `BLUETOOTH`/`BLUETOOTH_ADMIN`
- * permissions are granted at install time and none of these calls need a
- * runtime check. The manifest carries both variants.
+ * `bondedDevices`, `BluetoothDevice.name` and
+ * `createRfcommSocketToServiceRecord`. Below 31 the legacy
+ * `BLUETOOTH`/`BLUETOOTH_ADMIN` permissions are granted at install time and
+ * none of these calls need a runtime check. The manifest carries both
+ * variants.
  *
- * Discovery is never started, so no location permission appears anywhere.
+ * Discovery is never started or cancelled, so neither `BLUETOOTH_SCAN` nor a
+ * location permission appears anywhere — `cancelDiscovery()` is the one call
+ * that would need `BLUETOOTH_SCAN` on API 31+, and connecting to an
+ * already-bonded device does not require it.
  *
  * @param context any context; only its application context is retained.
  */
@@ -77,11 +81,10 @@ class AndroidBluetoothLink(context: Context) : BluetoothLink {
     /**
      * Connects RFCOMM to the bonded device at [address].
      *
-     * Discovery is cancelled first because an active inquiry slows a connect
-     * down by an order of magnitude. The socket is created with the SPP UUID,
-     * connected, and handed to [BluetoothSerialTransport]; if `connect()`
-     * fails the socket is closed before the exception propagates so no
-     * half-open channel is left behind.
+     * The socket is created with the SPP UUID, connected, and handed to
+     * [BluetoothSerialTransport]; if `connect()` fails the socket is closed
+     * before the exception propagates so no half-open channel is left behind.
+     * Discovery is intentionally not cancelled here (see the class KDoc).
      *
      * @throws IOException if Bluetooth is off or unavailable, or the connect
      *   times out / is refused.
@@ -94,7 +97,10 @@ class AndroidBluetoothLink(context: Context) : BluetoothLink {
             throw IOException("Bluetooth is turned off")
         }
 
-        adapter.cancelDiscovery()
+        // Deliberately no cancelDiscovery(): on API 31+ it needs the
+        // BLUETOOTH_SCAN permission, which this app does not hold (it never
+        // scans — it connects to already-bonded devices). Calling it threw a
+        // SecurityException that aborted the connect before the socket opened.
 
         val device = adapter.getRemoteDevice(address)
         val socket = device.createRfcommSocketToServiceRecord(BluetoothLink.SPP_UUID)
