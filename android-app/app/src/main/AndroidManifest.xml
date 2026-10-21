@@ -1,10 +1,32 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- USB host is required: the app talks to the STM32 CDC-ACM board directly. -->
+    <!--
+        Bluetooth Classic SPP (RFCOMM) to the ESP32 build of the board.
+        We only ever talk to already-bonded devices, never scan, so no
+        location permission is needed. On API 31+ BLUETOOTH_CONNECT is a
+        runtime permission (requested on the Connect screen); below 31 the
+        legacy pair is granted at install time.
+    -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+
+    <!--
+        Either transport is enough: USB for the STM32 board, Bluetooth for the
+        ESP32 board. Both are optional so the app installs on hardware that
+        only offers one of them.
+    -->
     <uses-feature
         android:name="android.hardware.usb.host"
-        android:required="true" />
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.bluetooth"
+        android:required="false" />
 
     <application
         android:allowBackup="true"
