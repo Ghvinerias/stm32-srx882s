@@ -1,5 +1,28 @@
 # Bluetooth LE (ESP32-C3 NUS) transport — 3 sessions
 
+> **Status: DONE (commit `818c070`).** The feature shipped in a single pass
+> rather than the three sessions sketched below, and with a slightly different
+> seam than §"How BLE maps onto the existing seams" describes. As built, the
+> `com.eelab.rflab.ble` package is:
+> - `BleLink` — injectable seam (`isScanPermissionGranted`,
+>   `isConnectPermissionGranted`, `scan(): Flow<List<BleEndpoint>>`,
+>   `suspend openTransport(address): RfLabTransport`) + the NUS UUID constants.
+> - `AndroidBleLink` — production `BleLink`: `BluetoothLeScanner` filtered on
+>   the NUS service, and the GATT connect → discover → request-MTU-247 →
+>   subscribe-CCCD sequence.
+> - `BleUartTransport` + `BleGattChannel` — the async→blocking bridge: the GATT
+>   callback pushes TX notifications into a `BlockingQueue` the transport's
+>   `read` drains, and resolves each write-with-response latch; `write` chunks
+>   to `MTU-3`. (This replaced the `BleInboundBuffer`/`BleGattPort` split
+>   sketched below — same job, one class.)
+> - `BleConnectController` — `ConnectPort` mirroring the USB/SPP controllers,
+>   JVM-tested with a fake `BleLink` (`BleConnectControllerTest`).
+> - Connect screen: 3-way USB / Bluetooth Classic / Bluetooth LE chooser with a
+>   multi-permission launcher (Scan+Connect on API 31+, Fine+Coarse Location on
+>   ≤30) and a live BLE scan picker.
+>
+> The original plan follows, unchanged, for context.
+
 Follow-up to PLAN_BLUETOOTH.md. The RF-lab fleet now includes **ESP32-C3**
 nodes (`../esp32c3-cc1101-lab/`), which are **BLE-only — no Bluetooth Classic**.
 The Classic SPP/RFCOMM transport added in PLAN_BLUETOOTH.md cannot reach them.
