@@ -25,6 +25,7 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.eelab.rflab.R
+import com.eelab.rflab.ble.AndroidBleLink
 import com.eelab.rflab.bluetooth.AndroidBluetoothLink
 import com.eelab.rflab.favorites.FavoritesRepository
 import com.eelab.rflab.favorites.SharedPreferencesFavoriteStorage
@@ -92,6 +93,10 @@ fun RfLabApp() {
     // Connect screen picks the bonded device and builds a controller per
     // address from this, mirroring how UsbConnectController owns USB.
     val bluetoothLink = remember(appContext) { AndroidBluetoothLink(appContext) }
+    // The BLE seam for the ESP32-C3 build: the Connect screen scans with it
+    // (the C3's Nordic UART peripheral is not bonded) and builds a per-address
+    // controller, mirroring the USB/SPP seams. No Activity retained.
+    val bleLink = remember(appContext) { AndroidBleLink(appContext) }
     // One process-wide favorites store; SharedPreferences keeps it across
     // process death, and remember keeps the same instance across tabs.
     val favoritesRepository = remember(appContext) {
@@ -138,6 +143,7 @@ fun RfLabApp() {
                 ConnectScreen(
                     usbPort = usbConnectPort,
                     bluetoothLink = bluetoothLink,
+                    bleLink = bleLink,
                 )
             }
             composable(Destination.Receive.route) { ReceiveScreen(viewModel = receiveViewModel) }

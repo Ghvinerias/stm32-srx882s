@@ -48,9 +48,13 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.eelab.rflab.ble.BleConnectController
+import com.eelab.rflab.ble.BleEndpoint
+import com.eelab.rflab.ble.BleLink
 import com.eelab.rflab.bluetooth.BluetoothConnectController
 import com.eelab.rflab.bluetooth.BluetoothEndpoint
 import com.eelab.rflab.bluetooth.BluetoothLink
+import com.eelab.rflab.ui.connect.C3_BOARD_NAME_PREFIX
 import com.eelab.rflab.ui.connect.ConnectTransport
 import com.eelab.rflab.ui.connect.ConnectUiState
 import com.eelab.rflab.ui.connect.ConnectViewModel
@@ -104,11 +108,16 @@ import java.util.Locale
  *   ([com.eelab.rflab.bluetooth.AndroidBluetoothLink]). The screen reads the
  *   bonded list from it and builds a per-address controller; it never opens a
  *   socket itself.
+ * @param bleLink BLE seam built by the app composition root
+ *   ([com.eelab.rflab.ble.AndroidBleLink]). The screen scans with it (the C3's
+ *   Nordic UART peripheral is not bonded) and builds a per-address controller;
+ *   it never opens a GATT link itself.
  */
 @Composable
 fun ConnectScreen(
     usbPort: ConnectPort,
     bluetoothLink: BluetoothLink,
+    bleLink: BleLink,
     modifier: Modifier = Modifier,
 ) {
     var transport by rememberSaveable { mutableStateOf(ConnectTransport.USB) }
@@ -193,21 +202,93 @@ fun ConnectScreen(
         ConnectUiState()
     }
 
+    // ---- BLE transport state --------------------------------------------
+    // Unlike SPP (bonded devices, no scan), the C3's Nordic UART peripheral is
+    // not bonded, so BLE must scan for it. That needs two grants on API 31+
+    // (Scan + Connect); below 31 a BLE scan needs ACCESS_FINE_LOCATION and the
+    // connect grant is install-time.
+    var bleScanGranted by remember { mutableStateOf(bleLink.isScanPermissionGranted()) }
+    var bleConnectGranted by remember { mutableStateOf(bleLink.isConnectPermissionGranted()) }
+    val bleReadyToScan = bleScanGranted && bleConnectGranted
+    var bleDevices by remember { mutableStateOf<List<BleEndpoint>?>(null) }
+    var selectedBleAddress by rememberSaveable { mutableStateOf<String?>(null) }
+
+    val blePermissions = remember {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            arrayOf(
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT,
+            )
+        } else {
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
+    val blePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) {
+        // Re-read from the link rather than trusting the result map: it is the
+        // single source of truth and already encodes the per-version rules.
+        bleScanGranted = bleLink.isScanPermissionGranted()
+        bleConnectGranted = bleLink.isConnectPermissionGranted()
+    }
+
+    val bleTarget = selectedBleAddress
+    val bleViewModel: ConnectViewModel? =
+        if (transport == ConnectTransport.BLE && bleTarget != null) {
+            // One controller/ViewModel per target, keyed by address, exactly
+            // like the Bluetooth path: BleConnectController fixes its target at
+            // construction and the key only changes while disconnected.
+            viewModel(
+                key = BLE_VIEW_MODEL_KEY_PREFIX + bleTarget,
+                factory = ConnectViewModel.factory(
+                    remember(bleTarget) { BleConnectController(bleLink, bleTarget) },
+                ),
+            )
+        } else {
+            null
+        }
+    val bleState: ConnectUiState = if (bleViewModel != null) {
+        val state by bleViewModel.uiState.collectAsStateWithLifecycle()
+        state
+    } else {
+        ConnectUiState()
+    }
+
+    // Scan while BLE is the active transport, both grants are held, and no
+    // link is opening/live (canDisconnect). Collecting starts the scan;
+    // leaving the transport or connecting cancels this effect, stopping it.
+    LaunchedEffect(transport, bleReadyToScan, bleState.canDisconnect) {
+        if (transport != ConnectTransport.BLE) return@LaunchedEffect
+        if (!bleReadyToScan) {
+            bleDevices = emptyList()
+            return@LaunchedEffect
+        }
+        if (bleState.canDisconnect) return@LaunchedEffect
+        bleDevices = emptyList()
+        runCatching { bleLink.scan().collect { bleDevices = it } }
+    }
+
     val activeState = when (transport) {
         ConnectTransport.USB -> usbState
         ConnectTransport.BLUETOOTH -> bluetoothState
+        ConnectTransport.BLE -> bleState
     }
-    val activeViewModel =
-        if (transport == ConnectTransport.USB) usbViewModel else bluetoothViewModel
+    val activeViewModel = when (transport) {
+        ConnectTransport.USB -> usbViewModel
+        ConnectTransport.BLUETOOTH -> bluetoothViewModel
+        ConnectTransport.BLE -> bleViewModel
+    }
 
     // Only switch while idle: canDisconnect is exactly CONNECTING/CONNECTED,
     // i.e. a link is opening or live and must be closed by the user first.
     val transportSwitchEnabled = !activeState.canDisconnect
 
     val bluetoothReady = bluetoothPermissionGranted && targetAddress != null
+    val bleReady = bleReadyToScan && bleTarget != null
     val connectEnabled = when (transport) {
         ConnectTransport.USB -> true
         ConnectTransport.BLUETOOTH -> bluetoothReady
+        ConnectTransport.BLE -> bleReady
     }
 
     ConnectScreen(
@@ -223,30 +304,56 @@ fun ConnectScreen(
         modifier = modifier,
         transportSwitchEnabled = transportSwitchEnabled,
         connectEnabled = connectEnabled,
-        transportContent = if (transport == ConnectTransport.BLUETOOTH) {
-            {
-                BluetoothDevicePicker(
-                    runtimePermissionRequired = runtimePermissionRequired,
-                    permissionGranted = bluetoothPermissionGranted,
-                    devices = bondedDevices,
-                    selectedAddress = targetAddress,
-                    onGrantPermission = {
-                        if (runtimePermissionRequired) {
-                            permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
-                        }
-                    },
-                    onSelect = { device -> selectedBluetoothAddress = device.address },
-                    onRefresh = {
-                        // Also re-check the grant: the user may have come back
-                        // from Settings after enabling Nearby devices.
-                        bluetoothPermissionGranted =
-                            bluetoothLink.isConnectPermissionGranted()
-                        bondedRevision++
-                    },
-                )
+        transportContent = when (transport) {
+            ConnectTransport.BLUETOOTH -> {
+                {
+                    BluetoothDevicePicker(
+                        runtimePermissionRequired = runtimePermissionRequired,
+                        permissionGranted = bluetoothPermissionGranted,
+                        devices = bondedDevices,
+                        selectedAddress = targetAddress,
+                        onGrantPermission = {
+                            if (runtimePermissionRequired) {
+                                permissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                            }
+                        },
+                        onSelect = { device -> selectedBluetoothAddress = device.address },
+                        onRefresh = {
+                            // Also re-check the grant: the user may have come
+                            // back from Settings after enabling Nearby devices.
+                            bluetoothPermissionGranted =
+                                bluetoothLink.isConnectPermissionGranted()
+                            bondedRevision++
+                        },
+                    )
+                }
             }
-        } else {
-            null
+
+            ConnectTransport.BLE -> {
+                {
+                    BleDevicePicker(
+                        permissionGranted = bleReadyToScan,
+                        devices = bleDevices,
+                        selectedAddress = bleTarget,
+                        onGrantPermission = { blePermissionLauncher.launch(blePermissions) },
+                        onSelect = { device -> selectedBleAddress = device.address },
+                        onRescan = {
+                            // Re-read the grants (the user may be back from
+                            // Settings) and restart from an empty list; the
+                            // scan effect re-collects on the next recomposition.
+                            bleScanGranted = bleLink.isScanPermissionGranted()
+                            bleConnectGranted = bleLink.isConnectPermissionGranted()
+                            bleDevices = if (bleScanGranted && bleConnectGranted) {
+                                emptyList()
+                            } else {
+                                null
+                            }
+                        },
+                    )
+                }
+            }
+
+            ConnectTransport.USB -> null
         },
     )
 }
@@ -553,6 +660,165 @@ private fun BluetoothDeviceRow(
     }
 }
 
+/**
+ * BLE-only body: permission rationale, a live scan list, and selection.
+ *
+ * Stateless on purpose — the wrapper owns the grant/scan/selection state, so
+ * this card can be previewed in every combination (permission missing,
+ * scanning with nothing seen, a few boards, one selected).
+ *
+ * Unlike the SPP picker this *scans*: the C3's Nordic UART peripheral is not
+ * bonded, so [devices] fills in as advertisements arrive while BLE is the
+ * active transport. The expected boards advertise as `KeeLoqLab-C3-A` / `-B`;
+ * when several appear the user's tap decides, and the MAC under each name is
+ * the identity actually connected to.
+ *
+ * @param permissionGranted true when both Scan and Connect grants are held.
+ * @param devices scan results so far, or null before the first scan / while
+ *   permission is missing.
+ * @param selectedAddress currently targeted MAC, if any.
+ * @param onGrantPermission launches the (multi-)permission request.
+ * @param onSelect sets the target device.
+ * @param onRescan re-checks the grants and restarts the scan list.
+ */
+@Composable
+internal fun BleDevicePicker(
+    permissionGranted: Boolean,
+    devices: List<BleEndpoint>?,
+    selectedAddress: String?,
+    onGrantPermission: () -> Unit,
+    onSelect: (BleEndpoint) -> Unit,
+    onRescan: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "BLE device",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f),
+                )
+                if (permissionGranted) {
+                    TextButton(onClick = onRescan) {
+                        Text("Rescan")
+                    }
+                }
+            }
+
+            if (!permissionGranted) {
+                Text(
+                    text = "Bluetooth permission is needed to scan for and " +
+                        "connect to the board. Android 12 and newer shows this " +
+                        "as \"Nearby devices\".",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Button(
+                    onClick = onGrantPermission,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Allow Bluetooth access")
+                }
+                Text(
+                    text = "If no dialog appears, enable Nearby devices for this " +
+                        "app in Android Settings, then tap Rescan.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                return@Column
+            }
+
+            when {
+                devices == null -> Text(
+                    text = "Tap Rescan to look for the board…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                devices.isEmpty() -> Text(
+                    text = "Scanning… power the board; it advertises as " +
+                        "${C3_BOARD_NAME_PREFIX}A / ${C3_BOARD_NAME_PREFIX}B.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+
+                else -> {
+                    Text(
+                        text = "Found devices (scanning…)",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    for (device in devices) {
+                        BleDeviceRow(
+                            device = device,
+                            selected = device.address == selectedAddress,
+                            onSelect = { onSelect(device) },
+                        )
+                    }
+                    if (selectedAddress == null) {
+                        Text(
+                            text = "Select a device to enable Connect.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * One selectable scanned device: radio dot, advertised name (or address when
+ * the advertisement carried none) and the MAC in monospace. Mirrors
+ * [BluetoothDeviceRow] so both pickers read identically.
+ */
+@Composable
+private fun BleDeviceRow(
+    device: BleEndpoint,
+    selected: Boolean,
+    onSelect: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .selectable(
+                selected = selected,
+                role = Role.RadioButton,
+                onClick = onSelect,
+            )
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(
+            selected = selected,
+            onClick = null,
+        )
+        Spacer(Modifier.width(12.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                text = device.name ?: "Unnamed device",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Text(
+                text = device.address,
+                style = MaterialTheme.typography.bodySmall,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
 @Composable
 private fun ConnectionStatusCard(
     state: ConnectUiState,
@@ -726,3 +992,6 @@ private const val USB_VIEW_MODEL_KEY: String = "connect-usb"
 
 /** Prefix for the per-address Bluetooth ViewModels (MAC appended). */
 private const val BLUETOOTH_VIEW_MODEL_KEY_PREFIX: String = "connect-bluetooth:"
+
+/** Prefix for the per-address BLE ViewModels (MAC appended). */
+private const val BLE_VIEW_MODEL_KEY_PREFIX: String = "connect-ble:"

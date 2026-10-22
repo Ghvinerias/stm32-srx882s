@@ -27,6 +27,7 @@ import java.util.Locale
 enum class ConnectTransport(val displayName: String) {
     USB("USB"),
     BLUETOOTH("Bluetooth"),
+    BLE("Bluetooth LE"),
 }
 
 /**
@@ -39,6 +40,16 @@ enum class ConnectTransport(val displayName: String) {
  * names are neither unique nor stable.
  */
 internal const val ESP32_BOARD_NAME: String = "ESP32-KeeLoq-Lab"
+
+/**
+ * BLE advertised-name prefix of the ESP32-C3 + CC1101 build (see
+ * `esp32c3-cc1101-lab/src/lab_config.h`: `LAB_BLE_NAME "KeeLoqLab-C3-" …`).
+ *
+ * Unit 1 advertises `KeeLoqLab-C3-A`, unit 2 `KeeLoqLab-C3-B`. Used only in
+ * hint copy; the picker shows whatever names the scan reports and connects by
+ * address.
+ */
+internal const val C3_BOARD_NAME_PREFIX: String = "KeeLoqLab-C3-"
 
 /**
  * Title for the status card, naming the active transport where the phase
@@ -77,6 +88,9 @@ internal fun connectStatusDetail(
 
         ConnectTransport.BLUETOOTH ->
             "Opening the RFCOMM link to the selected paired device…"
+
+        ConnectTransport.BLE ->
+            "Opening the BLE GATT link and subscribing to the UART service…"
     }
 
     ConnectionPhase.CONNECTED -> when (state.liveness) {
@@ -109,6 +123,11 @@ internal fun connectPermissionMessage(transport: ConnectTransport): String = whe
     ConnectTransport.BLUETOOTH ->
         "Bluetooth permission was denied. Allow it above — Android 12 and newer " +
             "calls it \"Nearby devices\" — then tap Connect again."
+
+    ConnectTransport.BLE ->
+        "Bluetooth permission was denied. BLE needs both Scan and Connect — " +
+            "Android 12 and newer groups them as \"Nearby devices\". Allow it " +
+            "above, then tap Connect again."
 }
 
 /**
@@ -147,6 +166,11 @@ internal fun connectFooterHint(transport: ConnectTransport): String = when (tran
             "$ESP32_BOARD_NAME. Only already-paired devices are listed — the app " +
             "never scans. This board build has no receive path, so the Receive " +
             "tab stays empty over Bluetooth."
+
+    ConnectTransport.BLE ->
+        "Power the ESP32-C3 board; it advertises over BLE as $C3_BOARD_NAME_PREFIX" +
+            "A / $C3_BOARD_NAME_PREFIX" + "B. No pairing is needed — tap Scan, pick " +
+            "the board, then Connect."
 }
 
 /**

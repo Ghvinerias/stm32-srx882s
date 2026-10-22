@@ -1,19 +1,36 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!--
-        Bluetooth Classic SPP (RFCOMM) to the ESP32 build of the board.
-        We only ever talk to already-bonded devices, never scan, so no
-        location permission is needed. On API 31+ BLUETOOTH_CONNECT is a
-        runtime permission (requested on the Connect screen); below 31 the
-        legacy pair is granted at install time.
+        Bluetooth Classic SPP (RFCOMM) to the original ESP32 build, and BLE
+        (Nordic UART Service) to the ESP32-C3 + CC1101 build.
+
+        BLUETOOTH_CONNECT (API 31+ runtime) covers opening a GATT/RFCOMM link
+        for both. The SPP path only talks to already-bonded devices and never
+        scans; the BLE path must scan, because the C3's NUS peripheral is not
+        bonded — hence BLUETOOTH_SCAN on API 31+ (flagged neverForLocation so
+        no location data is derived) and ACCESS_FINE_LOCATION on API 23–30,
+        where a BLE scan is location-gated (declared with the COARSE
+        counterpart, which the platform requires alongside FINE). Below 31 the
+        legacy BLUETOOTH pair is granted at install time.
     -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s" />
     <uses-permission
         android:name="android.permission.BLUETOOTH"
         android:maxSdkVersion="30" />
     <uses-permission
         android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.ACCESS_COARSE_LOCATION"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="30" />
 
     <!--
@@ -26,6 +43,9 @@
         android:required="false" />
     <uses-feature
         android:name="android.hardware.bluetooth"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.bluetooth_le"
         android:required="false" />
 
     <application
