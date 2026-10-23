@@ -12,4 +12,14 @@
     <usb-device
         vendor-id="51966"
         product-id="16385" />
+    <!--
+      ESP32-C3 "CC1101 RF Lab" CDC-ACM device: VID 0x303A (Espressif), PID
+      0x1001. Decimal here too:
+        0x303A = 12346
+        0x1001 = 4097
+      Matched explicitly in UsbDeviceFinder alongside the STM32 pair above.
+    -->
+    <usb-device
+        vendor-id="12346"
+        product-id="4097" />
 </resources>

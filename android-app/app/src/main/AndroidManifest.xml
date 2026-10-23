@@ -3,6 +3,13 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <!--
+        Firmware "Update to latest": HTTPS GETs to the lab's firmware web
+        server (serve_flash.py, trust-on-first-use pinned certificate). No
+        cleartext is intended or allowed — the app rejects http:// URLs.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
         Bluetooth Classic SPP (RFCOMM) to the original ESP32 build, and BLE
         (Nordic UART Service) to the ESP32-C3 + CC1101 build.
 

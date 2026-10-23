@@ -2,6 +2,7 @@ package com.eelab.rflab.ui
 
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
@@ -29,9 +30,12 @@ import com.eelab.rflab.ble.AndroidBleLink
 import com.eelab.rflab.bluetooth.AndroidBluetoothLink
 import com.eelab.rflab.favorites.FavoritesRepository
 import com.eelab.rflab.favorites.SharedPreferencesFavoriteStorage
+import com.eelab.rflab.ota.OtaGraph
+import com.eelab.rflab.ota.OtaSecretStore
 import com.eelab.rflab.send.SendGraph
 import com.eelab.rflab.ui.receive.ReceiveViewModel
 import com.eelab.rflab.ui.screens.ConnectScreen
+import com.eelab.rflab.ui.screens.FirmwareScreen
 import com.eelab.rflab.ui.screens.ReceiveScreen
 import com.eelab.rflab.ui.screens.SendScreen
 import com.eelab.rflab.usb.RfLabSession
@@ -45,10 +49,11 @@ private enum class Destination(
     Connect("connect", R.string.nav_connect, Icons.Default.Settings),
     Receive("receive", R.string.nav_receive, Icons.Default.List),
     Send("send", R.string.nav_send, Icons.Default.Send),
+    Firmware("firmware", R.string.nav_firmware, Icons.Default.Build),
 }
 
 /**
- * Top-level shell: three destinations with bottom navigation.
+ * Top-level shell: four destinations with bottom navigation.
  *
  * This is the app-level composition root for both shared resources:
  *
@@ -102,6 +107,31 @@ fun RfLabApp() {
     val favoritesRepository = remember(appContext) {
         FavoritesRepository(SharedPreferencesFavoriteStorage.create(appContext))
     }
+    // One process-wide OTA secret store: a dedicated SharedPreferences file
+    // (same storage mechanism as the favorites) holding the validated
+    // 64-hex-character secret typed on the Firmware tab.
+    val otaSecretStore = remember(appContext) { OtaSecretStore.create(appContext) }
+    // The firmware web server's settings, TLS pins and last-flashed-hash
+    // records — three dedicated prefs files built like the OTA secret store —
+    // plus the network side that uses them. `cacheDir` is the scratch area
+    // the verified image download runs through.
+    val firmwareSettingsStore = remember(appContext) {
+        com.eelab.rflab.ota.update.FirmwareServerSettingsStore.create(appContext)
+    }
+    val firmwareTofuPinStore = remember(appContext) {
+        com.eelab.rflab.ota.update.SharedPreferencesTofuPinStore.create(appContext)
+    }
+    val lastFlashStore = remember(appContext) {
+        com.eelab.rflab.ota.update.SharedPreferencesLastFlashStore.create(appContext)
+    }
+    val firmwareRemoteRepository = remember(appContext) {
+        com.eelab.rflab.ota.update.FirmwareRemoteRepository(
+            api = com.eelab.rflab.ota.update.FirmwareServerClient(
+                pinStore = firmwareTofuPinStore,
+            ),
+            cacheDir = appContext.cacheDir,
+        )
+    }
     // Activity-scoped so it outlives tab navigation and decodes continuously.
     val receiveViewModel: ReceiveViewModel = viewModel(
         factory = ReceiveViewModel.factory(RfLabSession.events),
@@ -151,6 +181,18 @@ fun RfLabApp() {
                 SendScreen(
                     sendEngine = sendEngine,
                     favoritesRepository = favoritesRepository,
+                )
+            }
+            composable(Destination.Firmware.route) {
+                FirmwareScreen(
+                    secretStore = otaSecretStore,
+                    engine = OtaGraph.engine,
+                    connectionStatus = RfLabSession.isConnected,
+                    settingsStore = firmwareSettingsStore,
+                    pinStore = firmwareTofuPinStore,
+                    lastFlashStore = lastFlashStore,
+                    repository = firmwareRemoteRepository,
+                    transportEvents = RfLabSession.events,
                 )
             }
         }

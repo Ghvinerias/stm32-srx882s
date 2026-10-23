@@ -4,4 +4,5 @@
     <string name="nav_connect">Connect</string>
     <string name="nav_receive">Receive</string>
     <string name="nav_send">Send</string>
+    <string name="nav_firmware">Firmware</string>
 </resources>

@@ -10,6 +10,8 @@ object PacketType {
     const val TX_COMMAND = 3
     const val SCENARIO_COMMAND = 4
     const val ACK = 5
+    const val OTA_CMD = 6
+    const val OTA_RESP = 7
 }
 
 /**
@@ -222,3 +224,279 @@ data class AckPacket(val forType: Int, val accepted: Boolean) : Packet {
         require(forType in 0..0xFF) { "forType must be a byte: $forType" }
     }
 }
+
+// ---------------------------------------------------------------------------
+// OTA / bootloader protocol (types 6 and 7)
+//
+// Same framing as types 1-5: `[version=1][type][...][crc16 LE]`, CRC-16/CCITT-
+// FALSE over everything before the CRC, then COBS + `0x00`. Layouts and
+// semantics come from `esp32c3-cc1101-lab/ota/OTA_PROTOCOL.md`; the normative
+// encoder is `ota_ref.py` in the same directory and the golden vectors in
+// `OTA_VECTORS.json` (which this app must reproduce byte-for-byte) have their
+// own JVM test under `app/src/test/resources`.
+// ---------------------------------------------------------------------------
+
+/** Operations of the OTA command/response pair, carried at offset 2. */
+object OtaOps {
+    const val HELLO = 1
+    const val BEGIN = 2
+    const val CHUNK = 3
+    const val END = 4
+    const val ABORT = 5
+    const val BOOTLOADER = 6
+
+    /** True for every operation the firmware defines. */
+    fun isValid(op: Int): Boolean = op in HELLO..BOOTLOADER
+}
+
+/** Status byte of OTA_RESP (type 7), carried at offset 3. */
+object OtaStatus {
+    const val OK = 0
+    const val BAD_STATE = 1
+    const val BAD_LENGTH = 2
+    const val DISABLED = 3
+    const val BAD_MAC = 4
+    const val TOO_BIG = 5
+    const val BAD_HASH = 6
+    const val BAD_OFFSET = 7
+    const val FLASH_ERROR = 8
+
+    /** True for every status the firmware defines. */
+    fun isValid(status: Int): Boolean = status in OK..FLASH_ERROR
+}
+
+/**
+ * A host → device OTA command (type 6): a generic [op]/[payload] pair.
+ *
+ * The payload layout depends only on [op], so this class carries plain bytes
+ * and [com.eelab.rflab.protocol.PacketCodec.encodeOtaCommand] wraps them;
+ * the factory functions below build each operation's payload.
+ *
+ * Instances are immutable; equality and hashing compare the payload
+ * contents, so commands built independently from the same inputs compare
+ * equal (the same guarantee [FramePacket] gives its pulse array).
+ */
+class OtaCommand internal constructor(val op: Int, val payload: ByteArray) : Packet {
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is OtaCommand) return false
+        return op == other.op && payload.contentEquals(other.payload)
+    }
+
+    override fun hashCode(): Int = 31 * op + payload.contentHashCode()
+
+    override fun toString(): String =
+        "OtaCommand(op=$op, payload=${payload.toHex()})"
+
+    companion object {
+        /** Largest CHUNK data length the protocol allows. */
+        const val MAX_CHUNK = 192
+
+        const val SHA256_SIZE = 32
+        const val MAC_SIZE = 32
+        const val NONCE_SIZE = 16
+
+        /** `[size u32][sha256 32][mac 32]`. */
+        const val BEGIN_PAYLOAD_SIZE = 4 + SHA256_SIZE + MAC_SIZE
+
+        /** `[mac 32]`. */
+        const val BOOTLOADER_PAYLOAD_SIZE = MAC_SIZE
+
+        /** `[offset u32]` header of a CHUNK payload, before the data bytes. */
+        const val CHUNK_HEADER_SIZE = 4
+
+        private val EMPTY = ByteArray(0)
+
+        /** `HELLO` — carries no payload, asks for a fresh nonce. */
+        fun hello(): OtaCommand = OtaCommand(OtaOps.HELLO, EMPTY)
+
+        /**
+         * `BEGIN [size u32][sha256 32][mac 32]`.
+         *
+         * @param size image size in bytes; the MAC proves the device should
+         *   accept it (see [OtaAuth.beginMac] for the exact HMAC input).
+         * @param sha256 digest of the whole image, checked again by the
+         *   device when END arrives.
+         * @param mac HMAC over the secret's session nonce and the size/digest.
+         */
+        fun begin(size: Long, sha256: ByteArray, mac: ByteArray): OtaCommand {
+            require(size in 0..TxCommand.UINT32_MAX) { "size must fit in 32 bits: $size" }
+            require(sha256.size == SHA256_SIZE) { "sha256 must be $SHA256_SIZE bytes" }
+            require(mac.size == MAC_SIZE) { "mac must be $MAC_SIZE bytes" }
+
+            val payload = ByteArray(BEGIN_PAYLOAD_SIZE)
+            putU32(payload, 0, size)
+            sha256.copyInto(payload, 4)
+            mac.copyInto(payload, 4 + SHA256_SIZE)
+            return OtaCommand(OtaOps.BEGIN, payload)
+        }
+
+        /**
+         * `CHUNK [offset u32][data 1..192]`.
+         *
+         * @param offset byte offset of [data] in the image; the device only
+         *   accepts the value it advertises as `next_offset`.
+         * @param data the image bytes at [offset], at most [MAX_CHUNK].
+         */
+        fun chunk(offset: Long, data: ByteArray): OtaCommand {
+            require(offset in 0..TxCommand.UINT32_MAX) { "offset must fit in 32 bits: $offset" }
+            require(data.isNotEmpty()) { "chunk data must not be empty" }
+            require(data.size <= MAX_CHUNK) {
+                "chunk data must be at most $MAX_CHUNK bytes: ${data.size}"
+            }
+            require(offset <= TxCommand.UINT32_MAX - data.size) {
+                "offset $offset plus ${data.size} bytes overflows the 32-bit field"
+            }
+
+            val payload = ByteArray(CHUNK_HEADER_SIZE + data.size)
+            putU32(payload, 0, offset)
+            data.copyInto(payload, CHUNK_HEADER_SIZE)
+            return OtaCommand(OtaOps.CHUNK, payload)
+        }
+
+        /** `END` — no payload; the device verifies the digest and reboots. */
+        fun end(): OtaCommand = OtaCommand(OtaOps.END, EMPTY)
+
+        /** `ABORT` — discards the partial write and returns the device to idle. */
+        fun abort(): OtaCommand = OtaCommand(OtaOps.ABORT, EMPTY)
+
+        /** `BOOTLOADER [mac 32]` — reboots into the ROM download mode. */
+        fun bootloader(mac: ByteArray): OtaCommand {
+            require(mac.size == MAC_SIZE) { "mac must be $MAC_SIZE bytes" }
+            return OtaCommand(OtaOps.BOOTLOADER, mac.copyOf())
+        }
+    }
+}
+
+/**
+ * A device → host OTA response (type 7): `[op][status][payload]`.
+ *
+ * [op] echoes the command it answers. The payload layout depends on the
+ * operation and status: `HELLO/OK` carries `[caps u8][max_chunk u16]
+ * [slot_size u32][nonce 16]`, and `CHUNK` (both OK and BAD_OFFSET) carries
+ * `[next_offset u32]`; every other combination defined by the protocol has an
+ * empty payload.
+ */
+class OtaResponse(val op: Int, val status: Int, val payload: ByteArray) : Packet {
+
+    /** True when the device accepted the command. */
+    val isOk: Boolean
+        get() = status == OtaStatus.OK
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is OtaResponse) return false
+        return op == other.op &&
+            status == other.status &&
+            payload.contentEquals(other.payload)
+    }
+
+    override fun hashCode(): Int {
+        var result = op
+        result = 31 * result + status
+        result = 31 * result + payload.contentHashCode()
+        return result
+    }
+
+    override fun toString(): String =
+        "OtaResponse(op=$op, status=$status, payload=${payload.toHex()})"
+
+    /** Parsed `HELLO/OK` response payload fields. */
+    data class HelloInfo(
+        /** Capability bitfield; bit 0 set means the OTA protocol is supported. */
+        val caps: Int,
+        /** Largest chunk data length the device will accept per CHUNK packet. */
+        val maxChunk: Int,
+        /** Size of the inactive OTA slot in bytes. */
+        val slotSize: Long,
+        /** 16-byte session nonce; a single-use input to the BEGIN/BOOTLOADER MACs. */
+        val nonce: ByteArray,
+    ) {
+        override fun equals(other: Any?): Boolean {
+            if (this === other) return true
+            if (other !is HelloInfo) return false
+            return caps == other.caps &&
+                maxChunk == other.maxChunk &&
+                slotSize == other.slotSize &&
+                nonce.contentEquals(other.nonce)
+        }
+
+        override fun hashCode(): Int {
+            var result = caps
+            result = 31 * result + maxChunk
+            result = 31 * result + slotSize.hashCode()
+            result = 31 * result + nonce.contentHashCode()
+            return result
+        }
+    }
+
+    /**
+     * Parses the HELLO/OK payload, or returns null when this response is not
+     * a successful HELLO or its payload does not have the 23-byte layout.
+     */
+    fun helloInfo(): HelloInfo? {
+        if (op != OtaOps.HELLO || !isOk) return null
+        if (payload.size != HELLO_PAYLOAD_SIZE) return null
+        return HelloInfo(
+            caps = readU8(payload, 0),
+            maxChunk = readU16(payload, 1),
+            slotSize = readU32(payload, 3),
+            nonce = payload.copyOfRange(NONCE_OFFSET, NONCE_OFFSET + OtaCommand.NONCE_SIZE),
+        )
+    }
+
+    /**
+     * The device's [next_offset] for a CHUNK response with status OK or
+     * BAD_OFFSET, or null when the payload does not carry the 32-bit field.
+     */
+    fun chunkNextOffset(): Long? {
+        if (op != OtaOps.CHUNK) return null
+        when (status) {
+            OtaStatus.OK, OtaStatus.BAD_OFFSET -> Unit
+            else -> return null
+        }
+        if (payload.size != CHUNK_NEXT_OFFSET_PAYLOAD_SIZE) return null
+        return readU32(payload, 0)
+    }
+
+    companion object {
+        /** `[caps u8][max_chunk u16][slot_size u32][nonce 16]` == 23 bytes. */
+        const val HELLO_PAYLOAD_SIZE = 1 + 2 + 4 + OtaCommand.NONCE_SIZE
+
+        /** Where the 16-byte nonce starts inside a HELLO payload. */
+        const val NONCE_OFFSET = 7
+
+        /** `[next_offset u32]`. */
+        const val CHUNK_NEXT_OFFSET_PAYLOAD_SIZE = 4
+    }
+}
+
+private fun putU32(target: ByteArray, offset: Int, value: Long) {
+    target[offset] = (value and 0xFF).toByte()
+    target[offset + 1] = ((value ushr 8) and 0xFF).toByte()
+    target[offset + 2] = ((value ushr 16) and 0xFF).toByte()
+    target[offset + 3] = ((value ushr 24) and 0xFF).toByte()
+}
+
+private fun readU8(bytes: ByteArray, offset: Int): Int = bytes[offset].toInt() and 0xFF
+
+private fun readU16(bytes: ByteArray, offset: Int): Int =
+    (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
+
+private fun readU32(bytes: ByteArray, offset: Int): Long =
+    (bytes[offset].toLong() and 0xFF) or
+        ((bytes[offset + 1].toLong() and 0xFF) shl 8) or
+        ((bytes[offset + 2].toLong() and 0xFF) shl 16) or
+        ((bytes[offset + 3].toLong() and 0xFF) shl 24)
+
+private fun ByteArray.toHex(): String {
+    val out = StringBuilder(size * 2)
+    for (byte in this) {
+        out.append(HEX[(byte.toInt() ushr 4) and 0xF])
+        out.append(HEX[byte.toInt() and 0xF])
+    }
+    return out.toString()
+}
+
+private const val HEX = "0123456789abcdef"

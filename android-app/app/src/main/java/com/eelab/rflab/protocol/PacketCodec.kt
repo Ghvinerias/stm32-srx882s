@@ -92,6 +92,17 @@ object PacketCodec {
     private const val MIN_PACKET_SIZE = SCENARIO_COMMAND_SIZE
 
     /**
+     * Minimum size of a raw OTA command (HELLO/END/ABORT carry no payload):
+     * `[version][type=6][op][crc]`.
+     */
+    const val OTA_CMD_MIN_SIZE = 3 + CRC_SIZE
+
+    /**
+     * Minimum size of a raw OTA response: `[version][type=7][op][status][crc]`.
+     */
+    const val OTA_RESP_MIN_SIZE = 4 + CRC_SIZE
+
+    /**
      * Decodes one raw packet buffer (post-COBS-decode, delimiter removed).
      *
      * The CRC is checked before the type is dispatched. FRAME and STATUS
@@ -125,6 +136,8 @@ object PacketCodec {
             PacketType.TX_COMMAND -> decodeTxCommand(raw)
             PacketType.SCENARIO_COMMAND -> decodeScenarioCommand(raw)
             PacketType.ACK -> decodeAck(raw)
+            PacketType.OTA_CMD -> decodeOtaCommand(raw)
+            PacketType.OTA_RESP -> decodeOtaResponse(raw)
             else -> PacketDecodeResult.Failure.UnknownType(type)
         }
     }
@@ -151,6 +164,23 @@ object PacketCodec {
         raw[0] = PROTOCOL_VERSION.toByte()
         raw[1] = PacketType.SCENARIO_COMMAND.toByte()
         raw[2] = cmd.commandChar.code.toByte()
+        return withCrc(raw)
+    }
+
+    /**
+     * Encodes [command] as a raw OTA_CMD (type 6) buffer, CRC included.
+     *
+     * `OtaCommand`'s factories validate the payload layout before this is
+     * called, and the wire shape `[1][6][op][payload][crc]` is shared with
+     * types 1-5; the COBS wrapping and `0x00` delimiter are added by the
+     * transport (see `RfLabConnection.sendPacket`).
+     */
+    fun encodeOtaCommand(command: OtaCommand): ByteArray {
+        val raw = ByteArray(3 + command.payload.size + CRC_SIZE)
+        raw[0] = PROTOCOL_VERSION.toByte()
+        raw[1] = PacketType.OTA_CMD.toByte()
+        raw[2] = command.op.toByte()
+        command.payload.copyInto(raw, 3)
         return withCrc(raw)
     }
 
@@ -286,6 +316,101 @@ object PacketCodec {
                 accepted = (raw[3].toInt() and 0xFF) != 0,
             ),
         )
+    }
+
+    /**
+     * Decodes one raw OTA_CMD (type 6) buffer, CRC already verified.
+     *
+     * The device never sends type 6, but decoding it is symmetrical with the
+     * other types (and lets tests echo commands back through the same path).
+     * Structural rules per operation come from `ota_ref.py`:
+     *
+     * ```
+     * op 1 HELLO / 4 END / 5 ABORT : no payload
+     * op 2 BEGIN                   : exactly 68 bytes (size + sha + mac)
+     * op 3 CHUNK                   : offset + 1..192 data bytes
+     * op 6 BOOTLOADER              : exactly 32 bytes (mac)
+     * ```
+     */
+    private fun decodeOtaCommand(raw: ByteArray): PacketDecodeResult {
+        if (raw.size < OTA_CMD_MIN_SIZE) {
+            return PacketDecodeResult.Failure.Truncated(OTA_CMD_MIN_SIZE, raw.size)
+        }
+
+        val op = raw[2].toInt() and 0xFF
+        if (!OtaOps.isValid(op)) {
+            return PacketDecodeResult.Failure.Malformed("unknown OTA op $op")
+        }
+
+        val payloadSize = raw.size - 3 - CRC_SIZE
+        val payload = raw.copyOfRange(3, raw.size - CRC_SIZE)
+        val requiredSize = when (op) {
+            OtaOps.HELLO, OtaOps.END, OtaOps.ABORT -> 0
+            OtaOps.BEGIN -> OtaCommand.BEGIN_PAYLOAD_SIZE
+            OtaOps.BOOTLOADER -> OtaCommand.BOOTLOADER_PAYLOAD_SIZE
+            else -> null // CHUNK: a range, checked below
+        }
+        if (requiredSize != null && payloadSize != requiredSize) {
+            return PacketDecodeResult.Failure.Malformed(
+                "OTA op $op payload must be $requiredSize bytes, got $payloadSize",
+            )
+        }
+        if (op == OtaOps.CHUNK) {
+            val dataBytes = payloadSize - OtaCommand.CHUNK_HEADER_SIZE
+            if (dataBytes !in 1..OtaCommand.MAX_CHUNK) {
+                return PacketDecodeResult.Failure.Malformed(
+                    "CHUNK data must be 1..${OtaCommand.MAX_CHUNK} bytes, got $dataBytes",
+                )
+            }
+        }
+
+        return PacketDecodeResult.Success(OtaCommand(op, payload))
+    }
+
+    /**
+     * Decodes one raw OTA_RESP (type 7) buffer into an [OtaResponse].
+     *
+     * `op` echoes the answered command and [OtaStatus.isValid] bounds the
+     * status byte. Payload shapes are validated only where the protocol pins
+     * them: `HELLO/OK` is the fixed 23-byte capabilities+nonce block and a
+     * `CHUNK` reply (OK or BAD_OFFSET) always carries the 32-bit
+     * `next_offset` the host needs to stay in step; everything else is left
+     * opaque.
+     */
+    private fun decodeOtaResponse(raw: ByteArray): PacketDecodeResult {
+        if (raw.size < OTA_RESP_MIN_SIZE) {
+            return PacketDecodeResult.Failure.Truncated(OTA_RESP_MIN_SIZE, raw.size)
+        }
+
+        val op = raw[2].toInt() and 0xFF
+        if (!OtaOps.isValid(op)) {
+            return PacketDecodeResult.Failure.Malformed("unknown OTA op $op")
+        }
+        val status = raw[3].toInt() and 0xFF
+        if (!OtaStatus.isValid(status)) {
+            return PacketDecodeResult.Failure.Malformed("unknown OTA status $status")
+        }
+
+        val payload = raw.copyOfRange(4, raw.size - CRC_SIZE)
+        if (op == OtaOps.HELLO && status == OtaStatus.OK) {
+            if (payload.size != OtaResponse.HELLO_PAYLOAD_SIZE) {
+                return PacketDecodeResult.Failure.Malformed(
+                    "HELLO/OK payload must be ${OtaResponse.HELLO_PAYLOAD_SIZE} bytes, " +
+                        "got ${payload.size}",
+                )
+            }
+        }
+        if (op == OtaOps.CHUNK &&
+            (status == OtaStatus.OK || status == OtaStatus.BAD_OFFSET) &&
+            payload.size != OtaResponse.CHUNK_NEXT_OFFSET_PAYLOAD_SIZE
+        ) {
+            return PacketDecodeResult.Failure.Malformed(
+                "CHUNK $status payload must be " +
+                    "${OtaResponse.CHUNK_NEXT_OFFSET_PAYLOAD_SIZE} bytes, got ${payload.size}",
+            )
+        }
+
+        return PacketDecodeResult.Success(OtaResponse(op, status, payload))
     }
 
     /** Appends a little-endian CRC over everything preceding it. */
