@@ -1,0 +1,37 @@
+<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width">
+<title>KeeLoq Lab C3 flasher</title>
+<style>body{font:15px system-ui;max-width:46em;margin:2em auto;padding:0 1em}pre{background:#111;color:#cfc;padding:.6em;height:16em;overflow:auto}button{font-size:1em;padding:.5em 1em;margin:.2em}progress{width:100%}code{background:#eee;padding:0 .2em}</style>
+<h2>KeeLoq Lab ESP32-C3 flasher</h2>
+<p id=ctx style="color:#b00"></p>
+<p>Plug the board into <b>this</b> computer (Chrome/Edge), pick the unit, press Flash. It writes the
+<i>merged</i> image at 0x0 (this repartitions to two OTA slots) after clearing the force-download flag
+(<code>0x600080F4</code>) so the new app boots. If the board is not listed, hold BOOT while plugging it in.</p>
+<button id=a>Flash unit A (id 1)</button><button id=b>Flash unit B (id 2)</button>
+<progress id=p value=0 max=100></progress><pre id=log></pre>
+<p>Downloads: <a href=fw/esp32c3-cc1101-lab-unit1-merged.bin>unit1-merged</a> ·
+<a href=fw/esp32c3-cc1101-lab-unit2-merged.bin>unit2-merged</a> ·
+<a href=fw/esp32c3-cc1101-lab-unit1-app.bin>unit1-app (OTA)</a> ·
+<a href=fw/esp32c3-cc1101-lab-unit2-app.bin>unit2-app (OTA)</a> · <a href=fw/SHA256SUMS>SHA256SUMS</a></p>
+<script type=module>
+import {ESPLoader, Transport} from './esptool-bundle.js';
+const log=document.getElementById('log'), p=document.getElementById('p');
+const say=t=>{log.textContent+=t+'\n';log.scrollTop=1e9};
+if(!(isSecureContext && 'serial' in navigator)) document.getElementById('ctx').textContent =
+  'Web Serial is unavailable here: it needs Chrome/Edge AND http://localhost (or https). Open this page on the computer the board is plugged into via http://localhost:8000/ (e.g. ssh -L 8000:localhost:8000), or use the esptool commands from the README.';
+async function flash(n){
+  try{
+    const buf=new Uint8Array(await (await fetch(`fw/esp32c3-cc1101-lab-unit${n}-merged.bin`)).arrayBuffer());
+    say(`image ${buf.length} bytes`);
+    const port=await navigator.serial.requestPort({filters:[{usbVendorId:0x303a}]});
+    const transport=new Transport(port,true);
+    const loader=new ESPLoader({transport,baudrate:460800,romBaudrate:115200,terminal:{clean(){log.textContent=''},writeLine:say,write:t=>{log.textContent+=t}}});
+    say(await loader.main());
+    await loader.writeReg(0x600080F4,0); say('cleared RTC_CNTL_OPTION1');
+    await loader.writeFlash({fileArray:[{data:buf,address:0}],flashSize:'keep',flashMode:'keep',flashFreq:'keep',eraseAll:false,compress:true,
+      reportProgress:(i,w,t)=>{p.value=100*w/t}});
+    await loader.after('hard_reset'); say('DONE - board reset. Power-cycle it if it does not start.');
+    await transport.disconnect();
+  }catch(e){say('ERROR: '+e)}
+}
+document.getElementById('a').onclick=()=>flash(1); document.getElementById('b').onclick=()=>flash(2);
+</script>

@@ -76,7 +76,7 @@ class FirmwareServerClient(
     ): Long? = withContext(ioDispatcher) {
         val connection = connect(settings, imagePath(fileName))
         try {
-            val statusCode = connection.responseCode
+            val statusCode = responseCodeOf(connection)
             ensureInRange(statusCode)
             connection.contentLengthFromHeader()
         } finally {
@@ -92,7 +92,7 @@ class FirmwareServerClient(
     ): String = withContext(ioDispatcher) {
         val connection = connect(settings, imagePath(fileName))
         try {
-            val statusCode = connection.responseCode
+            val statusCode = responseCodeOf(connection)
             ensureInRange(statusCode)
             val totalFromHeader = connection.contentLengthFromHeader()
             val digest = MessageDigest.getInstance("SHA-256")
@@ -127,7 +127,7 @@ class FirmwareServerClient(
     ): String = withContext(ioDispatcher) {
         val connection = connect(settings, path)
         try {
-            val statusCode = connection.responseCode
+            val statusCode = responseCodeOf(connection)
             ensureInRange(statusCode)
             connection.inputStream.use(InputStream::readBytes).decodeToString()
         } finally {
@@ -194,6 +194,15 @@ class FirmwareServerClient(
         )
     }
 
+    /** Runs the TLS handshake + request, surfacing typed trust failures. */
+    private fun responseCodeOf(connection: HttpURLConnection): Int = try {
+        connection.responseCode
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        throw mapIoException(error)
+    }
+
     /** Maps a 2xx-or-die status to a readable exception. */
     private fun ensureInRange(statusCode: Int): Unit = when (statusCode) {
         in HTTP_OK..HTTP_OK_END -> Unit
@@ -201,7 +210,18 @@ class FirmwareServerClient(
         else -> throw FirmwareServerException.ServerError(statusCode)
     }
 
-    private fun mapIoException(error: Exception): IOException = when (error) {
+    private fun mapIoException(error: Exception): IOException = when {
+        // The TLS stack wraps exceptions thrown by our TrustManager (first
+        // use / changed certificate) inside an SSLHandshakeException, so look
+        // through the cause chain for the typed exception first.
+        generateSequence<Throwable>(error) { it.cause }
+            .firstOrNull { it is FirmwareServerException } != null ->
+            generateSequence<Throwable>(error) { it.cause }
+                .first { it is FirmwareServerException } as FirmwareServerException
+        else -> mapPlainIoException(error)
+    }
+
+    private fun mapPlainIoException(error: Exception): IOException = when (error) {
         is FirmwareServerException -> error
         is SocketTimeoutException -> FirmwareServerException.Timeout()
         is UnknownHostException -> FirmwareServerException.Unreachable(error)

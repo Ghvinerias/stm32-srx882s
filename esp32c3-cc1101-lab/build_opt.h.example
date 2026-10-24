@@ -1,0 +1,2 @@
+-DLAB_UNIT_ID=2
+"-DLAB_OTA_SECRET_HEX_EXAMPLE=/* OTA shared secret example: replace this whole line with -DLAB_OTA_SECRET_HEX=\"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\" (64 hex chars) */"
