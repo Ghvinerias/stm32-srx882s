@@ -44,16 +44,22 @@ class ScaleEstimator {
     /**
      * Add one frame's pulses to the pool.
      *
-     * Every pulse from index [DATA_CELL_START] onwards is pooled, whether or
-     * not the frame is a valid 77-entry frame — the Python reference slices
-     * each frame's `pulses_us` the same way, so short/noise frames still
-     * contribute whatever data cells they have.
+     * Only frames with exactly [FRAME_PULSE_COUNT] entries are pooled. The
+     * Python reference pools every frame, but it runs on clean SRX882
+     * captures; the CC1101 receiver forwards a steady stream of short noise
+     * frames, and their cells would drag the median off the MID class and
+     * mis-scale (and so reject) every real frame. The pool is also bounded to
+     * the most recent [MAX_POOLED] cells so a long session cannot grow it
+     * without limit.
      */
     fun addFrame(pulses: IntArray) {
+        if (pulses.size != FRAME_PULSE_COUNT) return
         synchronized(lock) {
-            val start = minOf(DATA_CELL_START, pulses.size)
-            for (i in start until pulses.size) {
+            for (i in DATA_CELL_START until pulses.size) {
                 dataCells.add(pulses[i])
+            }
+            if (dataCells.size > MAX_POOLED) {
+                dataCells.subList(0, dataCells.size - MAX_POOLED).clear()
             }
             cachedScale = null
         }
@@ -77,6 +83,9 @@ class ScaleEstimator {
     companion object {
         /** Fewer pooled data cells than this means "not enough to calibrate". */
         const val MIN_SAMPLES = 8
+
+        /** Most recent data cells kept in the pool (about 60 frames). */
+        const val MAX_POOLED = 65 * 60
 
         /** Lower bound of a plausible scale; outside this we fall back to 1.0. */
         const val MIN_SCALE = 0.85
@@ -116,6 +125,7 @@ class ScaleEstimator {
         fun estimateScaleForFrames(frames: Iterable<IntArray>): Double {
             val pooled = ArrayList<Int>()
             for (pulses in frames) {
+                if (pulses.size != FRAME_PULSE_COUNT) continue
                 for (i in DATA_CELL_START until pulses.size) {
                     pooled.add(pulses[i])
                 }

@@ -258,6 +258,17 @@ static void tx_selftest_cb(int mode, char *out, size_t capacity) {
              ok, keyed, (unsigned)rmt.last_tx_us, (unsigned)expected_us);
 }
 
+// Re-arm retries are rate-limited so a persistent failure can never starve
+// the loop (or flood any log) -- ACK latency matters more.  Re-arm at once
+// after a normal reception; back off only after a failed arm.
+static void rx_rearm(uint32_t now) {
+    if (!radio_rmt_rx_armed() && !ota_session_rx_suspended() &&
+        (!last_arm_failed || (uint32_t)(now - last_arm_try_ms) >= RX_REARM_RETRY_MS)) {
+        last_arm_try_ms = now;
+        last_arm_failed = !radio_rmt_rx_arm();
+    }
+}
+
 static proto_sink_t transport_sink;
 static command_ops_t command_ops;
 
@@ -368,24 +379,21 @@ void firmware_app_loop(void) {
     }
 
     // ---- captured frames ----
+    // Re-arm before each send: the next frame of a remote's burst starts
+    // ~7 ms after the RX-done event, while a FRAME over BLE (several paced
+    // notify chunks) or a slow USB host can hold the loop longer than that.
+    // The ISR already copied the symbols out, so the RMT buffer is free.
+    rx_rearm(now);
     capture_frame_t frame;
     while (radio_rmt_rx_pop(&frame)) {
+        rx_rearm(now);
         (void)proto_send_frame(&frame, radio_rmt_dropped_frames(),
                                PROTO_LINK_ALL);
         digitalWrite(LAB_PIN_STATUS_LED, LOW);
         delayMicroseconds(200);
         digitalWrite(LAB_PIN_STATUS_LED, HIGH);
     }
-
-    // Re-arm retries are rate-limited so a persistent failure can never
-    // starve the loop (or flood any log) -- ACK latency matters more.
-    // Re-arm at once after a normal reception (the next frame of a remote's
-    // burst can follow ~10 ms later); back off only after a failed arm.
-    if (!radio_rmt_rx_armed() && !ota_session_rx_suspended() &&
-        (!last_arm_failed || (uint32_t)(now - last_arm_try_ms) >= RX_REARM_RETRY_MS)) {
-        last_arm_try_ms = now;
-        last_arm_failed = !radio_rmt_rx_arm();
-    }
+    rx_rearm(now);
 
     // ---- STATUS heartbeat ----
     if ((uint32_t)(now - last_status_ms) >= 1000U) {

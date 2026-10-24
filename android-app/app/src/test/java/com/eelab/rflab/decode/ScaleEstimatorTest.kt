@@ -13,22 +13,33 @@ class ScaleEstimatorTest {
 
     @Test
     fun fewerThanEightSamplesIsUncalibrated() {
-        val estimator = ScaleEstimator()
-        repeat(ScaleEstimator.MIN_SAMPLES - 1) {
-            estimator.addFrame(IntArray(DATA_CELL_START + 1) { MID_US })
-        }
-
-        assertEquals(7, estimator.sampleCount)
-        assertEquals(1.0, estimator.scale, 0.0)
+        assertEquals(1.0, ScaleEstimator.estimateScale(List(7) { 1184 }), 0.0)
     }
 
     @Test
     fun eighthSampleEnablesEstimation() {
-        val estimator = ScaleEstimator()
-        repeat(ScaleEstimator.MIN_SAMPLES) {
-            estimator.addFrame(IntArray(DATA_CELL_START + 1) { 1184 })
-        }
+        assertEquals(1184.0 / MID_US, ScaleEstimator.estimateScale(List(8) { 1184 }), 1e-12)
+    }
 
+    @Test
+    fun shortNoiseFramesAreNotPooled() {
+        // The CC1101 forwards many short noise frames; their ~400 us cells
+        // must not drag the scale away from a real remote's MID class.
+        val estimator = ScaleEstimator()
+        repeat(50) { estimator.addFrame(IntArray(40) { 1000 }) }
+        repeat(3) { estimator.addFrame(IntArray(FRAME_PULSE_COUNT) { 1184 }) }
+
+        assertEquals(3 * 65, estimator.sampleCount)
+        assertEquals(1184.0 / MID_US, estimator.scale, 1e-12)
+    }
+
+    @Test
+    fun poolIsBoundedToRecentCells() {
+        val estimator = ScaleEstimator()
+        repeat(100) { estimator.addFrame(IntArray(FRAME_PULSE_COUNT) { 1000 }) }
+        repeat(60) { estimator.addFrame(IntArray(FRAME_PULSE_COUNT) { 1184 }) }
+
+        assertEquals(ScaleEstimator.MAX_POOLED, estimator.sampleCount)
         assertEquals(1184.0 / MID_US, estimator.scale, 1e-12)
     }
 
