@@ -2,7 +2,8 @@
 """T1: ESP32 diagnostics over USB CDC text commands.
 
 Checks, against the live ESP32-C3 + CC1101:
-  * `radio`  -> CC1101 ready, partnum=0x00, version 0x14 or 0x04, state=RX
+  * `radio`  -> CC1101 ready, partnum=0x00, version 0x14 or 0x04, state RX
+                or IDLE, and mode idle at boot (mode bits / MODE line)
   * `regs`   -> register read-back: IOCFG0=2e PKTCTRL0=32 MDMCFG2=30
                 FREND0=11, FREQ=0x10/0xB0/0x71, PATABLE starts 00,c0,...
   * `gpio`   -> pad levels present and gdo2 level matches GPIO10 (not MISMATCH)
@@ -63,17 +64,36 @@ def main() -> int:
         except ValueError:
             partnum = None
         if partnum != 0x00:
-            problems.append(f"partnum={radio.get("PARTNUM")} (want 00)")
+            problems.append(f"partnum={radio.get('PARTNUM')} (want 00)")
         try:
             version = int(radio.get("VERSION", "zz"), 16)
         except ValueError:
             version = None
         if version not in (0x14, 0x04):
-            problems.append(f"version={radio.get("VERSION")} (want 14 or 04)")
-        if radio.get("STATE") not in ("RX",):
-            problems.append(f"state={radio.get('STATE')} (want RX)")
+            problems.append(f"version={radio.get('VERSION')} (want 14 or 04)")
+        # The radio boots in IDLE (RMT RX off) and only listens after
+        # MODE_COMMAND rx, so the CC1101 may sit in IDLE instead of RX here.
+        state = radio.get("STATE")
+        if state not in ("RX", "IDLE"):
+            problems.append(f"state={state} (want RX or IDLE)")
         if "NOT_READY" in captured[1]:
             problems.append("radio NOT_READY (CC1101 init failed)")
+
+        # Mode is reported either inline (mode=idle) or as its own MODE line;
+        # check it only when present, so older firmware still passes the rest.
+        inline_mode = lib.mode_from_line(captured[1])
+        if "MODE" in radio:
+            if inline_mode != lib.MODE_IDLE:
+                problems.append(
+                    f"mode={radio.get('MODE')} (want idle at boot)"
+                )
+        mode_line = device.wait_line("MODE", timeout=1.0)
+        if mode_line is not None:
+            tries.append(f"mode_line={mode_line[1].strip()}")
+            if lib.mode_from_line(mode_line[1]) != lib.MODE_IDLE:
+                problems.append(
+                    f"{mode_line[1].strip()} (want mode idle at boot)"
+                )
 
         device.send_text("regs")
         captured = device.wait_line("REGS", timeout=3.0)

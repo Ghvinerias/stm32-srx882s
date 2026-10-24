@@ -1,6 +1,7 @@
 #include "lab_tx.h"
 
 #include <stddef.h>
+#include <string.h>
 
 // Edge-to-edge durations, in microseconds, from the first complete frame in
 // tools/captures/keeloq-button1.ndjson.  Identical to the STM32 table: the
@@ -24,14 +25,24 @@ static const uint16_t stale_frame_us[] = {
 #define ORIGINAL_BUTTON_1 0x02U
 #define STALE_HOPPING 0xBBA8D1CAU
 
-static lab_tx_emit_fn emit_fn;
-static void *emit_context;
+static lab_tx_ops_t tx_ops;
+static lab_tx_done_fn done_fn;
+static void *done_context;
 static uint16_t plaintext_counter = 1U;
 static uint32_t prng_state = 0x6D2B79F5U;
 
-void lab_tx_init(lab_tx_emit_fn emit, void *context) {
-    emit_fn = emit;
-    emit_context = context;
+static void reset_job(void);
+
+void lab_tx_init(const lab_tx_ops_t *ops) {
+    if (ops) {
+        tx_ops = *ops;
+    }
+    reset_job();
+}
+
+void lab_tx_set_done(lab_tx_done_fn done, void *context) {
+    done_fn = done;
+    done_context = context;
 }
 
 void lab_tx_build_bits(uint8_t bits[LAB_CODEWORD_BITS], uint32_t hopping,
@@ -155,18 +166,127 @@ size_t lab_tx_build_waveform(uint32_t hopping, uint32_t serial, uint8_t button,
     return count;
 }
 
-static int emit_waveform(uint32_t hopping, uint32_t serial, uint8_t button,
-                         uint8_t frame_count) {
-    if (!emit_fn || frame_count == 0U) {
+typedef struct {
+    int active;
+    uint8_t kind;
+    uint8_t link;
+    uint16_t total;
+    uint16_t sent;
+    int aborted;
+    int failed;
+    int use_bits;
+    uint8_t bits[LAB_CODEWORD_BITS];
+    uint32_t hopping;
+    uint32_t serial;
+    uint8_t button;
+    uint32_t frame_ms;      // nominal on-air time of one frame
+    uint32_t queue_after_ms; // when the next frame may be queued
+    uint32_t cur_start_ms;  // start of the frame at the head of the queue
+} tx_job_t;
+
+static tx_job_t job;
+
+static void reset_job(void) { memset(&job, 0, sizeof(job)); }
+
+int lab_tx_busy(void) { return job.active; }
+
+static void finish_job(void) {
+    int aborted = job.aborted && job.sent < job.total;
+    uint8_t result = job.failed ? LAB_TX_RESULT_REJECTED
+                     : aborted  ? LAB_TX_RESULT_ABORTED
+                                : LAB_TX_RESULT_COMPLETE;
+    uint8_t kind = job.kind, link = job.link;
+    job.active = 0;
+    if (tx_ops.end) {
+        tx_ops.end(tx_ops.context, aborted);
+    }
+    if (done_fn) {
+        done_fn(done_context, kind, link, result);
+    }
+}
+
+void lab_tx_abort(void) {
+    if (job.active) {
+        job.aborted = 1;
+    }
+}
+
+void lab_tx_poll(void) {
+    if (!job.active) {
+        return;
+    }
+    unsigned inflight = tx_ops.inflight ? tx_ops.inflight(tx_ops.context) : 0U;
+    int draining = job.sent >= job.total || job.aborted || job.failed;
+    if (draining) {
+        if (inflight == 0U) {
+            finish_job();
+        }
+        return;
+    }
+    uint32_t now = tx_ops.now_ms ? tx_ops.now_ms(tx_ops.context) : 0U;
+    int may_queue = inflight == 0U ||
+                    (inflight == 1U &&
+                     (int32_t)(now - job.queue_after_ms) >= 0);
+    if (!may_queue) {
+        return;
+    }
+    uint8_t bits[LAB_CODEWORD_BITS];
+    if (job.use_bits) {
+        memcpy(bits, job.bits, sizeof(bits));
+    } else {
+        lab_tx_build_bits(bits, job.hopping, job.serial, job.button,
+                          (uint8_t)(job.sent > 255U ? 255U : job.sent));
+    }
+    uint16_t pulses[LAB_FRAME_PULSES];
+    size_t count = lab_tx_pwm_frame(bits, pulses, LAB_FRAME_PULSES);
+    int queued = count ? tx_ops.queue(tx_ops.context, pulses, count) : -1;
+    if (queued < 0) {
+        job.failed = 1;
+        return;
+    }
+    if (queued == 0) {
+        return; // radio queue full: retry on the next poll
+    }
+    uint32_t frame_ms = 0;
+    for (size_t i = 0; i < count; ++i) {
+        frame_ms += pulses[i];
+    }
+    job.frame_ms = frame_ms / 1000U;
+    // A frame queued behind a running one starts when that one ends.
+    job.cur_start_ms = inflight == 0U ? now : job.cur_start_ms + job.frame_ms;
+    job.queue_after_ms = job.cur_start_ms + job.frame_ms - LAB_TX_LOOKAHEAD_MS;
+    job.sent++;
+}
+
+static int start_job(uint32_t hopping, uint32_t serial, uint8_t button,
+                     const uint8_t *bits, uint16_t frames, uint8_t kind,
+                     uint8_t link) {
+    if (job.active || !tx_ops.begin || !tx_ops.queue || frames == 0U) {
         return 0;
     }
-    static uint16_t pulses[LAB_TX_MAX_PULSES]; // too big for the loop stack
-    size_t count = lab_tx_build_waveform(hopping, serial, button, frame_count,
-                                        pulses, LAB_TX_MAX_PULSES);
-    if (count == 0U) {
+    if (!tx_ops.begin(tx_ops.context)) {
         return 0;
     }
-    return emit_fn(emit_context, pulses, count) ? 1 : 0;
+    memset(&job, 0, sizeof(job));
+    job.active = 1;
+    job.kind = kind;
+    job.link = link;
+    job.total = frames;
+    job.hopping = hopping;
+    job.serial = serial;
+    job.button = button;
+    if (bits) {
+        memcpy(job.bits, bits, LAB_CODEWORD_BITS);
+        job.use_bits = 1;
+    }
+    lab_tx_poll(); // queue the first frame at once
+    return 1;
+}
+
+int lab_tx_start_codeword(uint32_t hopping, uint32_t serial, uint8_t button,
+                          uint8_t frame_count, uint8_t kind, uint8_t link) {
+    return start_job(hopping, serial, button, NULL,
+                     frame_count == 0U ? 1U : frame_count, kind, link);
 }
 
 size_t lab_tx_stale_frame(const uint16_t **pulses) {
@@ -176,52 +296,52 @@ size_t lab_tx_stale_frame(const uint16_t **pulses) {
     return STALE_FRAME_PULSES;
 }
 
-int lab_tx_send_stale_replay(void) {
-    if (!emit_fn) {
-        return 0;
-    }
-    // The stored capture is in the reduced 77-period form: decode it and
-    // transmit it as real PWM.
-    uint8_t bits[LAB_CODEWORD_BITS];
-    uint16_t pulses[LAB_FRAME_PULSES];
-    if (!lab_tx_bits_from_periods(stale_frame_us, STALE_FRAME_PULSES, bits)) {
-        return 0;
-    }
-    size_t count = lab_tx_pwm_frame(bits, pulses, LAB_FRAME_PULSES);
-    return count && emit_fn(emit_context, pulses, count) ? 1 : 0;
-}
-
-int lab_tx_send_codeword(uint32_t hopping, uint32_t serial, uint8_t button,
-                         uint8_t frame_count) {
-    return emit_waveform(hopping, serial, button, frame_count);
-}
-
-int lab_tx_run_scenario(uint8_t command) {
+int lab_tx_start_scenario(uint8_t command, uint8_t kind, uint8_t link) {
     switch (command) {
-    case 'r':
-        return lab_tx_send_stale_replay();
+    case 'r': {
+        // The stored capture is in the reduced 77-period form: decode it and
+        // transmit it as real PWM (one frame).
+        uint8_t bits[LAB_CODEWORD_BITS];
+        if (!lab_tx_bits_from_periods(stale_frame_us, STALE_FRAME_PULSES,
+                                      bits)) {
+            return 0;
+        }
+        return start_job(0U, 0U, 0U, bits, 1U, kind, link);
+    }
     case 's':
-        return lab_tx_send_codeword(STALE_HOPPING, ORIGINAL_SERIAL,
-                                    ORIGINAL_BUTTON_1, 3U);
+        return lab_tx_start_codeword(STALE_HOPPING, ORIGINAL_SERIAL,
+                                     ORIGINAL_BUTTON_1, 3U, kind, link);
     case 'z':
-        return lab_tx_send_codeword(0U, ORIGINAL_SERIAL, ORIGINAL_BUTTON_1, 3U);
+        return lab_tx_start_codeword(0U, ORIGINAL_SERIAL, ORIGINAL_BUTTON_1,
+                                     3U, kind, link);
     case 'p': {
         // HCS301 plaintext organization before encryption: sync[15:0],
         // discrimination[25:16], overflow[27:26], button[31:28].
-        uint32_t hopping = (uint32_t)plaintext_counter++ |
+        uint32_t hopping = (uint32_t)plaintext_counter |
                            ((ORIGINAL_SERIAL & 0x3FFU) << 16) |
                            ((uint32_t)ORIGINAL_BUTTON_1 << 28);
-        return lab_tx_send_codeword(hopping, ORIGINAL_SERIAL,
-                                    ORIGINAL_BUTTON_1, 3U);
+        if (!lab_tx_start_codeword(hopping, ORIGINAL_SERIAL,
+                                   ORIGINAL_BUTTON_1, 3U, kind, link)) {
+            return 0;
+        }
+        ++plaintext_counter;
+        return 1;
     }
-    case 'x':
-        prng_state ^= prng_state << 13;
-        prng_state ^= prng_state >> 17;
-        prng_state ^= prng_state << 5;
-        return lab_tx_send_codeword(prng_state, ORIGINAL_SERIAL,
-                                    ORIGINAL_BUTTON_1, 3U);
+    case 'x': {
+        uint32_t state = prng_state;
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        if (!lab_tx_start_codeword(state, ORIGINAL_SERIAL, ORIGINAL_BUTTON_1,
+                                   3U, kind, link)) {
+            return 0;
+        }
+        prng_state = state;
+        return 1;
+    }
     case 'd':
-        return lab_tx_send_codeword(0U, COPIER_SERIAL, ORIGINAL_BUTTON_1, 3U);
+        return lab_tx_start_codeword(0U, COPIER_SERIAL, ORIGINAL_BUTTON_1, 3U,
+                                     kind, link);
     default:
         return 0;
     }

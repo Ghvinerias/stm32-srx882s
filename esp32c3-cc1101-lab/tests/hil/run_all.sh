@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run the T1..T6 hardware-in-the-loop test suite on the bench machine.
+# Run the T1..T9 hardware-in-the-loop test suite on the bench machine.
 #
 #   ~/venv/bin/python tests/hil/run_all.sh            # everything
 #   HIL_TESTS="t1 t3 t4" tests/hil/run_all.sh         # a subset
@@ -7,6 +7,9 @@
 # Honours the same env vars as the individual scripts (ports overrides
 # HIL_STM32_PORT / HIL_ESP_PORT, plus optional sigrok player channels via
 # HIL_CH_ESP_TX / HIL_CH_ESP_RX); the venv python is one of them.
+#
+# T7 assumes the device is freshly booted (IDLE) when it starts, so it runs
+# after T6, which leaves the radio back in IDLE like T4/T5 do.
 #
 # Captures land in tests/hil/captures/ (one file per test step, each kept
 # under HIL_SR_MAX_MB=2 MB, older files are pruned daily-and-by-count).
@@ -18,9 +21,9 @@ CAP_DIR="$HIL_DIR/captures"
 LOG_DIR="$CAP_DIR/logs"
 mkdir -p "$CAP_DIR" "$LOG_DIR"
 
-ALL="t1_diagnostics t2_tx_carrier t3_tx_frame t4_rx_frame t5_ble t6_usb"
+ALL="t1_diagnostics t2_tx_carrier t3_tx_frame t4_rx_frame t5_ble t6_usb t7_modes t8_long_burst t9_abort"
 NAMES=""
-for t in ${HIL_TESTS:-T1 T2 T3 T4 T5 T6}; do
+for t in ${HIL_TESTS:-T1 T2 T3 T4 T5 T6 T7 T8 T9}; do
   case "$t" in
     T1|t1) NAMES="$NAMES t1_diagnostics";;
     T2|t2) NAMES="$NAMES t2_tx_carrier";;
@@ -28,6 +31,9 @@ for t in ${HIL_TESTS:-T1 T2 T3 T4 T5 T6}; do
     T4|t4) NAMES="$NAMES t4_rx_frame";;
     T5|t5) NAMES="$NAMES t5_ble";;
     T6|t6) NAMES="$NAMES t6_usb";;
+    T7|t7) NAMES="$NAMES t7_modes";;
+    T8|t8) NAMES="$NAMES t8_long_burst";;
+    T9|t9) NAMES="$NAMES t9_abort";;
     *) case "$t" in
          t?_*) NAMES="$NAMES $t";;
          *) echo "unknown test id '$t', skipping" >&2;;

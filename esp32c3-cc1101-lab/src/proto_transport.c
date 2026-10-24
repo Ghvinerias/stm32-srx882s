@@ -12,6 +12,7 @@ static const proto_sink_t *sink;
 static uint16_t next_sequence;
 static uint16_t dropped_packets;
 static uint16_t persistent_flags;
+static uint8_t current_mode;
 static uint8_t raw_packet[RAW_PACKET_MAX];
 static uint8_t encoded_packet[ENCODED_PACKET_MAX];
 
@@ -167,7 +168,10 @@ void proto_init(const proto_sink_t *new_sink, uint16_t boot_flags) {
     next_sequence = 0;
     dropped_packets = 0;
     persistent_flags = boot_flags;
+    current_mode = 0U;
 }
+
+void proto_set_mode(uint8_t mode) { current_mode = (uint8_t)(mode & 3U); }
 
 int proto_send_ack(uint8_t for_type, uint8_t accepted, uint8_t targets) {
     uint8_t ack[6];
@@ -210,7 +214,8 @@ int proto_send_status(uint32_t clock_hz, uint16_t capture_drops,
         (uint16_t)(total_edges >> 16U),
         dropped_packets,
     };
-    return send_packet(PROTO_TYPE_STATUS, 0, 0, capture_drops, 0, status, 5,
+    return send_packet(PROTO_TYPE_STATUS,
+                       (uint16_t)((uint16_t)current_mode << PROTO_FLAG_MODE_SHIFT), 0, capture_drops, 0, status, 5,
                        targets);
 }
 

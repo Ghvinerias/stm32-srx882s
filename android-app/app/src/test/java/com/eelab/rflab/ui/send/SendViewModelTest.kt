@@ -165,7 +165,7 @@ class SendViewModelTest {
     fun rejectsFramesOutsideOneToTen() {
         val viewModel = newViewModel()
 
-        for (invalid in listOf("0", "11", "-1", "ten")) {
+        for (invalid in listOf("0", "256", "-1", "ten")) {
             fillValidEntry(viewModel, frames = invalid)
 
             assertFalse("frames '$invalid' must be rejected", viewModel.addManualEntry())
@@ -266,8 +266,8 @@ class SendViewModelTest {
         viewModel.setFrameCount(item.id, 0)
         assertEquals(1, sendQueue.items.value.single().frameCount)
 
-        viewModel.setFrameCount(item.id, 99)
-        assertEquals(10, sendQueue.items.value.single().frameCount)
+        viewModel.setFrameCount(item.id, 999)
+        assertEquals(255, sendQueue.items.value.single().frameCount)
 
         viewModel.setFrameCount(item.id, 7)
         assertEquals(7, sendQueue.items.value.single().frameCount)

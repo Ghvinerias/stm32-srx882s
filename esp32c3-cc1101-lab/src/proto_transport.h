@@ -31,6 +31,7 @@ enum {
     PROTO_TYPE_ACK = 5U,              // device -> host
     PROTO_TYPE_OTA_CMD = 6U,          // host -> device, see ota/OTA_PROTOCOL.md
     PROTO_TYPE_OTA_RESP = 7U,         // device -> host
+    PROTO_TYPE_MODE_COMMAND = 8U,     // host -> device: [1][8][mode][crc16]
 };
 
 enum {
@@ -39,6 +40,10 @@ enum {
     PROTO_FLAG_CLOCK_FALLBACK = 1U << 8,
     PROTO_FLAG_CAPTURE_INIT_FAILED = 1U << 9,
 };
+
+// STATUS flags bits 2..3 carry the radio mode: 0 IDLE, 1 RX, 2 TX.
+#define PROTO_FLAG_MODE_SHIFT 2U
+#define PROTO_FLAG_MODE_MASK (3U << PROTO_FLAG_MODE_SHIFT)
 
 // Link bit mask.  FRAME/STATUS go to both links, ACKs and text replies go
 // back only to the link the command arrived on.
@@ -62,6 +67,9 @@ extern "C" {
 #endif
 
 void proto_init(const proto_sink_t *sink, uint16_t boot_flags);
+
+// Mode reported in every following STATUS (RADIO_MODE_* value 0..2).
+void proto_set_mode(uint8_t mode);
 
 int proto_send_status(uint32_t clock_hz, uint16_t capture_drops,
                       uint32_t total_edges, uint8_t targets);

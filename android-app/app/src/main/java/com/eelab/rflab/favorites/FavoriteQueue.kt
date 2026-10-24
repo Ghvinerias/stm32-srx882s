@@ -14,7 +14,7 @@ import com.eelab.rflab.queue.SendQueueItem
  * @property hopping 32-bit hopping word.
  * @property serial 28-bit serial number.
  * @property button button nibble, `0x0..0xF`.
- * @property frameCount number of frames to transmit, `1..10`.
+ * @property frameCount number of frames to transmit, `1..255`.
  */
 data class FavoriteItem(
     val hopping: Long,

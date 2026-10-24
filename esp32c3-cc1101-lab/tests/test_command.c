@@ -5,25 +5,10 @@
 #include "src/command_parse.h"
 #include "src/lab_tx.h"
 #include "src/proto_transport.h"
+#include "src/radio_mode.h"
 
 #include "test_util.h"
-
-typedef struct {
-    uint16_t pulses[LAB_TX_MAX_PULSES];
-    size_t count;
-    int calls;
-    int result;
-} tx_rec_t;
-
-static int rec_emit(void *context, const uint16_t *pulses, size_t count) {
-    tx_rec_t *rec = (tx_rec_t *)context;
-    ++rec->calls;
-    rec->count = count;
-    if (count <= LAB_TX_MAX_PULSES) {
-        memcpy(rec->pulses, pulses, count * sizeof(pulses[0]));
-    }
-    return rec->result;
-}
+#include "fake_radio.h"
 
 static void put_u32_le(uint8_t *out, uint32_t value) {
     out[0] = (uint8_t)(value & 0xFFU);
@@ -134,13 +119,11 @@ int main(void) {
     memset(&links, 0, sizeof(links));
     links.deliver_mask = 0x03U;
     proto_sink_t sink = {link_write, &links};
-    tx_rec_t tx;
-    memset(&tx, 0, sizeof(tx));
-    tx.result = 1;
+    fake_radio_t radio;
+    fake_radio_init(&radio);
 
     proto_init(&sink, 0U);
     command_parse_init(&sink, NULL);
-    lab_tx_init(rec_emit, &tx);
 
     // ---- binary TX_COMMAND ----
     {
@@ -148,45 +131,56 @@ int main(void) {
         build_tx_command(raw, 0x114766B9U, 0x0FB58C0CU, 2U, 5U);
         rec_reset(&links.usb);
         rec_reset(&links.ble);
-        tx.calls = 0;
+        radio.bursts = radio.frames_queued = 0U;
         feed_binary(PROTO_LINK_USB, raw, 14U);
+        expect("TX_COMMAND starts a burst without ACKing yet",
+               radio.bursts == 1U && lab_tx_busy() && links.usb.length == 0U);
+        fake_pump(&radio);
 
-        expect("binary TX_COMMAND emits one burst", tx.calls == 1);
-        expect("five frames means 5 x 156 PWM pulses",
-               tx.count == 5U * LAB_FRAME_PULSES);
+        expect("five frames are streamed one by one", radio.frames_queued == 5U);
 
         uint8_t bits[LAB_CODEWORD_BITS];
         uint8_t expected[LAB_CODEWORD_BITS];
         lab_tx_build_bits(expected, 0x114766B9U, 0x0FB58C0CU, 2U, 0U);
-        expect("binary TX_COMMAND waveform carries the codeword",
-               decode_bits(tx.pulses, tx.count, bits) &&
+        expect("the first frame carries the codeword",
+               decode_bits(radio.first_frame, LAB_FRAME_PULSES, bits) &&
                    memcmp(bits, expected, sizeof(bits)) == 0);
 
         uint8_t type = 0, accepted = 0;
-        expect("binary TX_COMMAND is ACKed on the originating link",
+        expect("ACK(accepted=1) arrives when the burst ends, on the same link",
                decode_ack(&links.usb, &type, &accepted) &&
                    type == PROTO_TYPE_TX_COMMAND && accepted == 1U);
         expect("binary TX_COMMAND does not leak to the other link",
                links.ble.length == 0U);
     }
 
-    // ---- frame-count clamping ----
+    // ---- frame counts: 0 -> 1, up to 255 streamed ----
     {
         uint8_t raw[16];
         rec_reset(&links.usb);
-        tx.calls = 0;
+        radio.bursts = radio.frames_queued = 0U;
         build_tx_command(raw, 0U, 0U, 0U, 0U);
         feed_binary(PROTO_LINK_USB, raw, 14U);
-        expect("frame_count 0 is clamped to 1",
-               tx.calls == 1 && tx.count == LAB_FRAME_PULSES);
+        fake_pump(&radio);
+        expect("frame_count 0 is treated as 1", radio.frames_queued == 1U);
 
+        uint8_t type = 0, accepted = 0;
         rec_reset(&links.usb);
-        tx.calls = 0;
+        radio.bursts = radio.frames_queued = 0U;
         build_tx_command(raw, 0U, 0U, 0U, 200U);
         feed_binary(PROTO_LINK_USB, raw, 14U);
-        expect("frame_count 200 is clamped to 10", tx.calls == 1 &&
-                                                       tx.count ==
-                                                           LAB_TX_MAX_PULSES);
+        fake_pump(&radio);
+        expect("frame_count 200 is no longer capped", radio.frames_queued == 200U);
+
+        rec_reset(&links.usb);
+        radio.bursts = radio.frames_queued = 0U;
+        build_tx_command(raw, 0x114766B9U, 0x0FB58C0CU, 2U, 255U);
+        feed_binary(PROTO_LINK_USB, raw, 14U);
+        fake_pump(&radio);
+        expect("frame_count 255 streams all 255 frames",
+               radio.frames_queued == 255U && !lab_tx_busy());
+        expect("the 255-frame burst ACKs accepted=1",
+               decode_ack(&links.usb, &type, &accepted) && accepted == 1U);
     }
 
     // ---- binary SCENARIO_COMMAND ----
@@ -194,15 +188,21 @@ int main(void) {
         uint8_t raw[8];
         build_scenario_command(raw, 's');
         rec_reset(&links.usb);
-        tx.calls = 0;
+        radio.bursts = radio.frames_queued = 0U;
         feed_binary(PROTO_LINK_USB, raw, 5U);
-        expect("scenario 's' emits three frames", tx.calls == 1 &&
-                                                      tx.count ==
-                                                          3U * LAB_FRAME_PULSES);
+        fake_pump(&radio);
+        expect("scenario 's' streams three frames", radio.frames_queued == 3U);
         uint8_t type = 0, accepted = 0;
         expect("scenario is ACKed with its own packet type",
                decode_ack(&links.usb, &type, &accepted) &&
                    type == PROTO_TYPE_SCENARIO_COMMAND && accepted == 1U);
+
+        build_scenario_command(raw, 'q');
+        rec_reset(&links.usb);
+        feed_binary(PROTO_LINK_USB, raw, 5U);
+        expect("an unknown scenario is ACKed with accepted=0 at once",
+               decode_ack(&links.usb, &type, &accepted) && accepted == 0U &&
+                   !lab_tx_busy());
     }
 
     // ---- bad CRC is silently dropped ----
@@ -211,32 +211,46 @@ int main(void) {
         build_tx_command(raw, 1U, 2U, 3U, 4U);
         raw[13] ^= 0xFFU;
         rec_reset(&links.usb);
-        tx.calls = 0;
+        radio.bursts = 0U;
         feed_binary(PROTO_LINK_USB, raw, 14U);
         expect("bad CRC produces no TX and no ACK",
-               tx.calls == 0 && links.usb.length == 0U);
+               radio.bursts == 0U && links.usb.length == 0U);
+    }
+
+    // ---- radio refuses to enter TX ----
+    {
+        uint8_t raw[16], type = 0, accepted = 9;
+        radio.begin_ok = 0;
+        rec_reset(&links.usb);
+        build_tx_command(raw, 1U, 2U, 3U, 4U);
+        feed_binary(PROTO_LINK_USB, raw, 14U);
+        expect("a radio that cannot enter TX gives ACK accepted=0",
+               decode_ack(&links.usb, &type, &accepted) && accepted == 0U);
+        radio.begin_ok = 1;
     }
 
     // ---- ASCII tx path ----
     {
         const char *line = "tx 2 FB58C0C 2 1\r\n";
         rec_reset(&links.usb);
-        tx.calls = 0;
+        radio.bursts = radio.frames_queued = 0U;
         command_parse_feed(PROTO_LINK_USB, (const uint8_t *)line,
                            strlen(line));
-        expect("ASCII tx emits one frame", tx.calls == 1 &&
-                                               tx.count == LAB_FRAME_PULSES);
+        expect("ASCII tx reply announces the burst",
+               rec_is_text(&links.usb,
+                           "TX hopping=0x00000002 serial=0xfb58c0c "
+                           "button=0x2 frames=01 START\r\n"));
+        fake_pump(&radio);
+        expect("ASCII tx streams one frame", radio.frames_queued == 1U);
 
         uint8_t bits[LAB_CODEWORD_BITS];
         uint8_t expected[LAB_CODEWORD_BITS];
         lab_tx_build_bits(expected, 2U, 0x0FB58C0CU, 2U, 0U);
         expect("ASCII tx waveform carries the codeword",
-               decode_bits(tx.pulses, tx.count, bits) &&
+               decode_bits(radio.first_frame, LAB_FRAME_PULSES, bits) &&
                    memcmp(bits, expected, sizeof(bits)) == 0);
-        expect("ASCII tx reply matches the STM32 wording",
-               rec_is_text(&links.usb,
-                           "TX hopping=0x00000002 serial=0xfb58c0c "
-                           "button=0x2 frames=1 DONE\r\n"));
+        expect("ASCII tx reports DONE when the burst ends",
+               rec_is_text(&links.usb, "TX DONE\r\n"));
     }
 
     // ---- ASCII replies follow the originating link ----
@@ -258,18 +272,19 @@ int main(void) {
         size_t n = proto_cobs_encode(raw, 14U, encoded, sizeof(encoded));
         rec_reset(&links.usb);
         rec_reset(&links.ble);
-        tx.calls = 0;
+        radio.bursts = 0U;
 
         command_parse_feed(PROTO_LINK_USB, encoded, n / 2U);
         command_parse_feed(PROTO_LINK_BLE, encoded + n / 2U,
                            n - n / 2U);
         expect("halves on different links do not form a packet",
-               tx.calls == 0 && links.usb.length == 0U);
+               radio.bursts == 0U && links.usb.length == 0U);
 
         command_parse_feed(PROTO_LINK_USB, encoded + n / 2U,
                            n - n / 2U);
         expect("completing the packet on its own link dispatches it",
-               tx.calls == 1);
+               radio.bursts == 1U);
+        fake_pump(&radio);
         command_parse_reset_link(PROTO_LINK_BLE);
     }
 
@@ -312,11 +327,14 @@ int main(void) {
     {
         const char *word = "synthetic-stale\r\n";
         rec_reset(&links.usb);
-        tx.calls = 0;
+        radio.bursts = 0U;
         command_parse_feed(PROTO_LINK_USB, (const uint8_t *)word,
                            strlen(word));
         expect("scenario word runs and reports DONE",
-               tx.calls == 1 && rec_is_text(&links.usb, "RUN DONE"));
+               radio.bursts == 1U && rec_is_text(&links.usb, "RUN START"));
+        fake_pump(&radio);
+        expect("scenario letters report DONE when the burst ends",
+               rec_is_text(&links.usb, "RUN DONE"));
     }
 
     // ---- ESP32-only diagnostics ----
@@ -375,6 +393,116 @@ int main(void) {
         command_parse_feed(PROTO_LINK_USB, (const uint8_t *)tb, strlen(tb));
         expect("txtest rejects unknown arguments",
                rec_is_text(&links.usb, "Usage: txtest"));
+    }
+
+    // ---- radio modes: MODE_COMMAND, text `mode`, busy, abort ----
+    {
+        uint8_t raw[16], type = 0, accepted = 9;
+        // helper to send a MODE_COMMAND
+        #define SEND_MODE(m) do { \
+            raw[0] = 1U; raw[1] = PROTO_TYPE_MODE_COMMAND; raw[2] = (m); \
+            uint16_t c_ = proto_crc16(raw, 3U); \
+            raw[3] = (uint8_t)c_; raw[4] = (uint8_t)(c_ >> 8U); \
+            rec_reset(&links.usb); feed_binary(PROTO_LINK_USB, raw, 5U); } while (0)
+
+        radio_mode_init(&(radio_mode_ops_t){fake_apply, fake_changed, fake_abort, &radio});
+        radio.applies = radio.changes = 0U;
+        SEND_MODE(1U);
+        expect("MODE rx -> ACK(for_type 8, accepted 1)",
+               decode_ack(&links.usb, &type, &accepted) && type == PROTO_TYPE_MODE_COMMAND && accepted == 1U);
+        expect("MODE rx applies RX and reports it",
+               radio.last_base == RADIO_MODE_RX && radio.last_changed == RADIO_MODE_RX &&
+                   radio_mode_current() == RADIO_MODE_RX);
+        SEND_MODE(7U);
+        expect("unknown mode -> accepted 0 and the mode is unchanged",
+               decode_ack(&links.usb, &type, &accepted) && type == PROTO_TYPE_MODE_COMMAND &&
+                   accepted == 0U && radio_mode_current() == RADIO_MODE_RX);
+        SEND_MODE(0U);
+        expect("MODE idle -> accepted 1, base idle",
+               decode_ack(&links.usb, &type, &accepted) && accepted == 1U &&
+                   radio_mode_current() == RADIO_MODE_IDLE && radio.last_base == RADIO_MODE_IDLE);
+
+        const char *t1 = "mode rx\r\n";
+        rec_reset(&links.usb);
+        command_parse_feed(PROTO_LINK_USB, (const uint8_t *)t1, strlen(t1));
+        expect("text `mode rx` switches and replies", rec_is_text(&links.usb, "MODE rx") &&
+                                                       radio_mode_current() == RADIO_MODE_RX);
+        const char *t2 = "mode\r\n";
+        rec_reset(&links.usb);
+        command_parse_feed(PROTO_LINK_USB, (const uint8_t *)t2, strlen(t2));
+        expect("bare `mode` prints the current mode", rec_is_text(&links.usb, "MODE rx"));
+        const char *t3 = "mode idle\r\n";
+        rec_reset(&links.usb);
+        command_parse_feed(PROTO_LINK_USB, (const uint8_t *)t3, strlen(t3));
+        expect("text `mode idle` switches", rec_is_text(&links.usb, "MODE idle") &&
+                                             radio_mode_current() == RADIO_MODE_IDLE);
+        const char *t4 = "mode bogus\r\n";
+        rec_reset(&links.usb);
+        command_parse_feed(PROTO_LINK_USB, (const uint8_t *)t4, strlen(t4));
+        expect("`mode bogus` prints usage", rec_is_text(&links.usb, "Usage: mode"));
+
+        // --- TX is a transient mode that returns to the previous one ---
+        radio_mode_init(&(radio_mode_ops_t){fake_apply, fake_changed, fake_abort, &radio});
+        SEND_MODE(1U); // base RX
+        radio.history_len = 0U;
+        radio.auto_complete = 0;
+        radio.inflight = 0U;
+        radio.bursts = radio.frames_queued = 0U;
+        build_tx_command(raw, 0x114766B9U, 0x0FB58C0CU, 2U, 50U);
+        rec_reset(&links.usb);
+        feed_binary(PROTO_LINK_USB, raw, 14U);
+        expect("a TX burst reports mode TX", radio_mode_current() == RADIO_MODE_TX &&
+                                               radio.last_changed == RADIO_MODE_TX);
+
+        // a second TX_COMMAND mid-burst is rejected at once, not queued
+        uint8_t raw2[16];
+        rec_reset(&links.usb);
+        build_tx_command(raw2, 1U, 2U, 3U, 4U);
+        feed_binary(PROTO_LINK_USB, raw2, 14U);
+        expect("a second TX_COMMAND during a burst gets ACK accepted=0 (busy)",
+               decode_ack(&links.usb, &type, &accepted) && type == PROTO_TYPE_TX_COMMAND &&
+                   accepted == 0U && radio.bursts == 1U);
+
+        // MODE idle mid-burst: acknowledged now, burst aborted after its frame
+        unsigned ends_before = radio.ends;
+        SEND_MODE(0U);
+        expect("MODE idle mid-burst is ACKed immediately",
+               decode_ack(&links.usb, &type, &accepted) && type == PROTO_TYPE_MODE_COMMAND &&
+                   accepted == 1U);
+        expect("the abort waits for the frame on the air", lab_tx_busy() && radio.ends == ends_before);
+        unsigned queued_before = radio.frames_queued;
+        radio.now += 120U;
+        lab_tx_poll(); // frame still in flight (inflight=1)
+        expect("no new frame is queued after the abort", radio.frames_queued == queued_before);
+        rec_reset(&links.usb);
+        radio.inflight = 0U;
+        lab_tx_poll();
+        expect("burst ends: ACK accepted=2 (aborted)",
+               decode_ack(&links.usb, &type, &accepted) && type == PROTO_TYPE_TX_COMMAND &&
+                   accepted == 2U && radio.last_end_aborted == 1 && !lab_tx_busy());
+        expect("after the abort the device is IDLE and reported it",
+               radio_mode_current() == RADIO_MODE_IDLE && radio.last_changed == RADIO_MODE_IDLE &&
+                   radio.last_base == RADIO_MODE_IDLE && radio.frames_queued < 50U);
+
+        // a burst started in RX returns to RX; MODE rx during TX is deferred
+        SEND_MODE(1U);
+        radio.history_len = 0U;
+        radio.bursts = radio.frames_queued = 0U;
+        build_tx_command(raw, 1U, 2U, 3U, 3U);
+        feed_binary(PROTO_LINK_USB, raw, 14U);
+        radio.applies = 0U;
+        SEND_MODE(1U);
+        expect("MODE rx during TX is accepted but not applied until the burst ends",
+               radio.applies == 0U && radio_mode_current() == RADIO_MODE_TX);
+        radio.auto_complete = 1;
+        radio.inflight = 0U;
+        fake_pump(&radio);
+        expect("TX returns to the previous mode (RX)",
+               radio_mode_current() == RADIO_MODE_RX && radio.last_base == RADIO_MODE_RX &&
+                   radio.mode_history[0] == RADIO_MODE_TX &&
+                   radio.mode_history[radio.history_len - 1U] == RADIO_MODE_RX);
+        radio.auto_complete = 1;
+        #undef SEND_MODE
     }
 
     return test_result();

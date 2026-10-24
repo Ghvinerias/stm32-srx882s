@@ -5,6 +5,7 @@ import com.eelab.rflab.protocol.FramePacket
 import com.eelab.rflab.protocol.PacketCodec
 import com.eelab.rflab.protocol.PacketDecodeResult
 import com.eelab.rflab.protocol.PacketType
+import com.eelab.rflab.protocol.RadioMode
 import com.eelab.rflab.protocol.ScenarioCommand
 import com.eelab.rflab.protocol.StatusPacket
 import com.eelab.rflab.protocol.TxCommand
@@ -56,6 +57,9 @@ class BatchSendEngineTest {
     private fun ack(forType: Int, accepted: Boolean = true): TransportEvent =
         TransportEvent.PacketReceived(AckPacket(forType = forType, accepted = accepted))
 
+    private fun ackResult(forType: Int, result: Int): TransportEvent =
+        TransportEvent.PacketReceived(AckPacket(forType = forType, result = result))
+
     private fun packetEvent(packet: com.eelab.rflab.protocol.Packet): TransportEvent =
         TransportEvent.PacketReceived(packet)
 
@@ -96,6 +100,7 @@ class BatchSendEngineTest {
                 }
             },
             ackTimeoutMs = 200,
+            perFrameTimeoutMs = 0,
         )
 
         engine.sendBatch(listOf(item(1))) { _, status -> statuses += status }
@@ -126,6 +131,7 @@ class BatchSendEngineTest {
                 }
             },
             ackTimeoutMs = 200,
+            perFrameTimeoutMs = 0,
         )
 
         engine.sendBatch(listOf(item(1))) { _, status -> statuses += status }
@@ -142,6 +148,7 @@ class BatchSendEngineTest {
             events = events,
             sendPacket = { /* never acknowledged */ },
             ackTimeoutMs = 200,
+            perFrameTimeoutMs = 0,
         )
 
         engine.sendBatch(listOf(item(1))) { _, status -> statuses += status }
@@ -172,6 +179,7 @@ class BatchSendEngineTest {
                 }
             },
             ackTimeoutMs = 200,
+            perFrameTimeoutMs = 0,
         )
 
         val job = launch {
@@ -209,6 +217,7 @@ class BatchSendEngineTest {
                 }
             },
             ackTimeoutMs = 200,
+            perFrameTimeoutMs = 0,
         )
 
         engine.sendBatch(listOf(item(1), item(2), item(3))) { id, status ->
@@ -243,6 +252,7 @@ class BatchSendEngineTest {
                 firstWrite = false
             },
             ackTimeoutMs = 200,
+            perFrameTimeoutMs = 0,
         )
 
         engine.sendBatch(listOf(item(1), item(2))) { id, status -> statuses += id to status }
@@ -274,6 +284,7 @@ class BatchSendEngineTest {
                 }
             },
             ackTimeoutMs = 200,
+            perFrameTimeoutMs = 0,
         )
 
         val status = engine.sendScenario(ScenarioCommand(ScenarioCommand.PLAINTEXT_COUNTER))
@@ -296,6 +307,7 @@ class BatchSendEngineTest {
                 }
             },
             ackTimeoutMs = 200,
+            perFrameTimeoutMs = 0,
         )
         assertEquals(
             SendItemStatus.ACKED_FAILED,
@@ -306,6 +318,7 @@ class BatchSendEngineTest {
             events = events,
             sendPacket = { },
             ackTimeoutMs = 200,
+            perFrameTimeoutMs = 0,
         )
         assertEquals(
             SendItemStatus.TIMEOUT,
@@ -331,6 +344,7 @@ class BatchSendEngineTest {
             // Far longer than the test: the loss must resolve the wait, not
             // the timeout.
             ackTimeoutMs = 5_000,
+            perFrameTimeoutMs = 0,
         )
 
         engine.sendBatch(listOf(item(1), item(2), item(3))) { id, status ->
@@ -362,6 +376,7 @@ class BatchSendEngineTest {
                 }
             },
             ackTimeoutMs = 200,
+            perFrameTimeoutMs = 0,
         )
 
         engine.sendBatch(listOf(item(1), item(2), item(3))) { id, status ->
@@ -393,6 +408,7 @@ class BatchSendEngineTest {
                 }
             },
             ackTimeoutMs = 5_000,
+            perFrameTimeoutMs = 0,
         )
         assertEquals(
             SendItemStatus.FAILED,
@@ -403,6 +419,7 @@ class BatchSendEngineTest {
             events = events,
             sendPacket = { throw IOException("USB device is not connected") },
             ackTimeoutMs = 5_000,
+            perFrameTimeoutMs = 0,
         )
         assertEquals(
             SendItemStatus.FAILED,
@@ -417,6 +434,7 @@ class BatchSendEngineTest {
             events = events,
             sendPacket = { /* never acknowledged */ },
             ackTimeoutMs = 10_000,
+            perFrameTimeoutMs = 0,
         )
 
         val job = launch {
@@ -433,5 +451,149 @@ class BatchSendEngineTest {
         // process-scoped queue; item 2 was never attempted.
         assertEquals(1L to SendItemStatus.FAILED, statuses.last())
         assertEquals(1, statuses.count { it.second == SendItemStatus.SENDING })
+    }
+
+    // --- radio modes, long bursts, abort ------------------------------------
+
+    @Test
+    fun ackTimeoutScalesWithFrameCount() = runTest {
+        val engine = BatchSendEngine(events = events, sendPacket = { })
+        assertEquals(2_000L + 5 * 120L, engine.ackTimeoutFor(5))
+        assertEquals(2_000L + 255 * 120L, engine.ackTimeoutFor(255))
+    }
+
+    @Test
+    fun longBurstIsNotTimedOutBeforeItsScaledBudget() = runTest {
+        val statuses = mutableListOf<SendItemStatus>()
+        val engine = BatchSendEngine(
+            events = events,
+            sendPacket = {
+                launch {
+                    // 100 frames * ~105 ms: far beyond the old flat 2 s.
+                    delay(10_500)
+                    events.emit(ack(PacketType.TX_COMMAND))
+                }
+            },
+        )
+        engine.sendBatch(listOf(item(1, frameCount = 100))) { _, st -> statuses += st }
+        assertEquals(listOf(SendItemStatus.SENDING, SendItemStatus.ACKED_OK), statuses)
+    }
+
+    @Test
+    fun abortedAckEndsTheBatchAndLeavesTheRestPending() = runTest {
+        val statuses = mutableListOf<Pair<Long, SendItemStatus>>()
+        val writes = mutableListOf<ByteArray>()
+        val engine = BatchSendEngine(
+            events = events,
+            sendPacket = { raw ->
+                writes += raw
+                launch {
+                    delay(10)
+                    events.emit(ackResult(PacketType.TX_COMMAND, AckPacket.RESULT_ABORTED))
+                }
+            },
+            ackTimeoutMs = 200,
+            perFrameTimeoutMs = 0,
+        )
+
+        engine.sendBatch(listOf(item(1), item(2))) { id, st -> statuses += id to st }
+
+        assertEquals(
+            listOf(1L to SendItemStatus.SENDING, 1L to SendItemStatus.ABORTED),
+            statuses,
+        )
+        assertEquals(1, writes.size)
+    }
+
+    @Test
+    fun stopTransmitSendsModeIdleWhileABatchHoldsTheSendLock() = runTest {
+        val statuses = mutableListOf<Pair<Long, SendItemStatus>>()
+        val writes = mutableListOf<ByteArray>()
+        val engine = BatchSendEngine(
+            events = events,
+            sendPacket = { raw ->
+                writes += raw
+                if (raw[1].toInt() == PacketType.MODE_COMMAND) {
+                    launch {
+                        // Measured firmware order: MODE ACK first, the aborted
+                        // TX ACK ~150 ms later.
+                        delay(5)
+                        events.emit(ack(PacketType.MODE_COMMAND))
+                        delay(150)
+                        events.emit(ackResult(PacketType.TX_COMMAND, AckPacket.RESULT_ABORTED))
+                    }
+                }
+            },
+        )
+
+        val batch = launch {
+            engine.sendBatch(listOf(item(1, frameCount = 200), item(2))) { id, st ->
+                statuses += id to st
+            }
+        }
+        runCurrent()
+        assertEquals(1, writes.size) // TX burst on the wire, ACK pending
+
+        assertTrue(engine.stopTransmit())
+        // stopTransmit returned on the MODE ACK; the batch is still waiting
+        // for the aborted TX ACK.
+        assertTrue(batch.isActive)
+        assertEquals(SendItemStatus.SENDING, statuses.last().second)
+        batch.join()
+
+        assertEquals(2, writes.size)
+        assertEquals(
+            PacketCodec.encodeModeCommand(com.eelab.rflab.protocol.ModeCommand(RadioMode.IDLE)).toList(),
+            writes[1].toList(),
+        )
+        assertEquals(SendItemStatus.ABORTED, statuses.last().second)
+        assertTrue(statuses.none { it.first == 2L })
+    }
+
+    @Test
+    fun stopRequestedBeforeAnItemEndsTheBatchEvenWithoutAnAbortAck() = runTest {
+        val statuses = mutableListOf<Pair<Long, SendItemStatus>>()
+        val engine = BatchSendEngine(
+            events = events,
+            sendPacket = { raw ->
+                launch {
+                    delay(10)
+                    events.emit(
+                        if (raw[1].toInt() == PacketType.MODE_COMMAND) ack(PacketType.MODE_COMMAND)
+                        else ack(PacketType.TX_COMMAND),
+                    )
+                }
+            },
+            ackTimeoutMs = 200,
+            perFrameTimeoutMs = 0,
+        )
+        val batch = launch {
+            engine.sendBatch(listOf(item(1), item(2), item(3))) { id, st -> statuses += id to st }
+        }
+        runCurrent()
+        // Stop lands while item 1 is in flight; its ACK was still OK.
+        engine.stopTransmit()
+        batch.join()
+        assertTrue(statuses.none { it.first != 1L })
+    }
+
+    @Test
+    fun setModeReportsAcceptedRejectedAndTimeout() = runTest {
+        val ok = BatchSendEngine(
+            events = events,
+            sendPacket = { launch { delay(5); events.emit(ack(PacketType.MODE_COMMAND)) } },
+            ackTimeoutMs = 200,
+        )
+        assertTrue(ok.setMode(RadioMode.RX))
+
+        val rejected = BatchSendEngine(
+            events = events,
+            sendPacket = { launch { delay(5); events.emit(ack(PacketType.MODE_COMMAND, accepted = false)) } },
+            ackTimeoutMs = 200,
+        )
+        assertEquals(false, rejected.setMode(RadioMode.RX))
+
+        val silent = BatchSendEngine(events = events, sendPacket = { }, ackTimeoutMs = 200)
+        assertEquals(false, silent.setMode(RadioMode.IDLE))
     }
 }

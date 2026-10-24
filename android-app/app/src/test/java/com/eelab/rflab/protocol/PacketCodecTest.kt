@@ -141,6 +141,83 @@ class PacketCodecTest {
         assertEquals(false, rejected.accepted)
     }
 
+    @Test
+    fun ackResultByteDistinguishesOkRejectedAndAborted() {
+        // for_type 3 (TX), result 2 = burst aborted.
+        val aborted = PacketCodec.decode(hex("01050302956c")).packetAs<AckPacket>()
+        assertEquals(PacketType.TX_COMMAND, aborted.forType)
+        assertEquals(AckPacket.RESULT_ABORTED, aborted.result)
+        assertTrue(aborted.aborted)
+        assertEquals(false, aborted.accepted)
+
+        // for_type 8 (MODE), result 1 = accepted.
+        val mode = PacketCodec.decode(hex("010508010c80")).packetAs<AckPacket>()
+        assertEquals(PacketType.MODE_COMMAND, mode.forType)
+        assertTrue(mode.accepted)
+        assertEquals(false, mode.aborted)
+    }
+
+    @Test
+    fun encodeModeCommandMatchesSpecVectors() {
+        assertEquals("010800" + "0572", PacketCodec.encodeModeCommand(ModeCommand(RadioMode.IDLE)).toHex())
+        assertEquals("010801" + "2462", PacketCodec.encodeModeCommand(ModeCommand(RadioMode.RX)).toHex())
+        // Bad modes are the device's call to reject; the encoder passes any byte.
+        assertEquals("010807" + "e202", PacketCodec.encodeModeCommand(ModeCommand(7)).toHex())
+    }
+
+    @Test
+    fun modeCommandRoundTripsAndRejectsWrongLength() {
+        val raw = PacketCodec.encodeModeCommand(ModeCommand(RadioMode.RX))
+        assertEquals(ModeCommand(1), PacketCodec.decode(raw).packetAs<ModeCommand>())
+
+        val tooLong = withCrc(raw { u8(PROTOCOL_VERSION); u8(PacketType.MODE_COMMAND); u8(1); u8(0) })
+        assertMalformed(PacketCodec.decode(tooLong), "MODE_COMMAND")
+    }
+
+    @Test
+    fun statusFlagsCarryTheRadioMode() {
+        fun statusWith(flags: Int): StatusPacket {
+            val body = raw {
+                u8(PROTOCOL_VERSION)
+                u8(PacketType.STATUS)
+                u16(flags)
+                u16(1)
+                u16(PacketCodec.HEADER_SIZE + PacketCodec.STATUS_PAYLOAD_WORDS * 2 + PacketCodec.CRC_SIZE)
+                u32(0)
+                u16(0)
+                u16(PacketCodec.STATUS_PAYLOAD_WORDS)
+                u8(0)
+                u8(1)
+                repeat(PacketCodec.STATUS_PAYLOAD_WORDS) { u16(0) }
+            }
+            return PacketCodec.decode(withCrc(body)).packetAs<StatusPacket>()
+        }
+
+        assertEquals(RadioMode.IDLE, statusWith(0).mode)
+        assertEquals(RadioMode.RX, statusWith(RadioMode.RX.wire shl PacketFlags.MODE_SHIFT).mode)
+        assertEquals(RadioMode.TX, statusWith(RadioMode.TX.wire shl PacketFlags.MODE_SHIFT).mode)
+        // Literal wire values from the firmware: bits 2..3, mask 0x000C.
+        assertEquals(0x000C, PacketFlags.MODE_MASK)
+        assertEquals(RadioMode.IDLE, statusWith(0x0000).mode)
+        assertEquals(RadioMode.RX, statusWith(0x0004).mode)
+        assertEquals(RadioMode.TX, statusWith(0x0008).mode)
+        assertEquals(RadioMode.RX, statusWith(0x0004 or 0x0300).mode)
+        // Other flag bits do not disturb the mode.
+        assertEquals(
+            RadioMode.RX,
+            statusWith(PacketFlags.CLOCK_FALLBACK or (1 shl PacketFlags.MODE_SHIFT)).mode,
+        )
+    }
+
+    @Test
+    fun txCommandAcceptsUpTo255FramesOnTheWire() {
+        val encoded = PacketCodec.encodeTxCommand(
+            TxCommand(hopping = 0x1147_66B9L, serial = 0x0FB5_8C0CL, button = 2, frameCount = 255),
+        )
+        assertEquals("0103b96647110c8cb50f02ff8734", encoded.toHex())
+        assertEquals(255, PacketCodec.decode(encoded).packetAs<TxCommand>().frameCount)
+    }
+
     // ---- TX_COMMAND -----------------------------------------------------
 
     @Test
@@ -356,7 +433,7 @@ class PacketCodecTest {
         // Constructor guards (the app never puts these on the wire).
         assertThrows { TxCommand(0, 0, button = 0x10, frameCount = 1) }
         assertThrows { TxCommand(0, 0, button = 0, frameCount = 0) }
-        assertThrows { TxCommand(0, 0, button = 0, frameCount = 11) }
+        assertThrows { TxCommand(0, 0, button = 0, frameCount = 256) }
         assertThrows { ScenarioCommand('u') }
 
         // And a hand-crafted frame with an illegal button nibble is rejected

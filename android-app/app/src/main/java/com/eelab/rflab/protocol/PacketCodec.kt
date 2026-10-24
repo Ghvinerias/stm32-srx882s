@@ -66,6 +66,7 @@ sealed interface PacketDecodeResult {
  *                   button, frame_count, CRC)
  * SCENARIO_COMMAND: 5 bytes (version, type, command_char, CRC)
  * ACK             : 6 bytes (version, type, for_type, accepted, CRC)
+ * MODE_COMMAND    : 5 bytes (version, type=8, mode, CRC)
  * ```
  */
 object PacketCodec {
@@ -84,6 +85,9 @@ object PacketCodec {
 
     /** Total size of a raw ACK packet. */
     const val ACK_SIZE = 6
+
+    /** MODE_COMMAND raw size: version, type, mode, CRC. */
+    const val MODE_COMMAND_SIZE = 5
 
     /** STATUS always carries exactly this many payload words. */
     const val STATUS_PAYLOAD_WORDS = 5
@@ -136,6 +140,7 @@ object PacketCodec {
             PacketType.TX_COMMAND -> decodeTxCommand(raw)
             PacketType.SCENARIO_COMMAND -> decodeScenarioCommand(raw)
             PacketType.ACK -> decodeAck(raw)
+            PacketType.MODE_COMMAND -> decodeModeCommand(raw)
             PacketType.OTA_CMD -> decodeOtaCommand(raw)
             PacketType.OTA_RESP -> decodeOtaResponse(raw)
             else -> PacketDecodeResult.Failure.UnknownType(type)
@@ -155,6 +160,15 @@ object PacketCodec {
         putU32(raw, 6, cmd.serial and TxCommand.SERIAL_MASK)
         raw[10] = cmd.button.toByte()
         raw[11] = cmd.frameCount.toByte()
+        return withCrc(raw)
+    }
+
+    /** Encodes [cmd] as a 5-byte raw MODE_COMMAND buffer, CRC included. */
+    fun encodeModeCommand(cmd: ModeCommand): ByteArray {
+        val raw = ByteArray(MODE_COMMAND_SIZE)
+        raw[0] = PROTOCOL_VERSION.toByte()
+        raw[1] = PacketType.MODE_COMMAND.toByte()
+        raw[2] = cmd.mode.toByte()
         return withCrc(raw)
     }
 
@@ -303,6 +317,15 @@ object PacketCodec {
         return PacketDecodeResult.Success(ScenarioCommand(commandChar))
     }
 
+    private fun decodeModeCommand(raw: ByteArray): PacketDecodeResult {
+        if (raw.size != MODE_COMMAND_SIZE) {
+            return PacketDecodeResult.Failure.Malformed(
+                "MODE_COMMAND must be $MODE_COMMAND_SIZE bytes, got ${raw.size}",
+            )
+        }
+        return PacketDecodeResult.Success(ModeCommand(raw[2].toInt() and 0xFF))
+    }
+
     private fun decodeAck(raw: ByteArray): PacketDecodeResult {
         if (raw.size != ACK_SIZE) {
             return PacketDecodeResult.Failure.Malformed(
@@ -313,7 +336,7 @@ object PacketCodec {
         return PacketDecodeResult.Success(
             AckPacket(
                 forType = raw[2].toInt() and 0xFF,
-                accepted = (raw[3].toInt() and 0xFF) != 0,
+                result = raw[3].toInt() and 0xFF,
             ),
         )
     }

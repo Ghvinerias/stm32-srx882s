@@ -6,7 +6,10 @@
     (device -> host notifications)
   * STATUS packet within 2 s of subscribing
   * binary TX_COMMAND written to 6E400002-B5A3-F393-E0A9-E50E24DCCA9E in
-    MTU-3 chunks, ACK accepted=1 expected back
+    MTU-3 chunks, ACK accepted=1 expected back (the device returns to the
+    mode it was in before the burst)
+  * MODE_COMMAND rx over BLE first, because the device boots in IDLE and
+    only notifies FRAME packets in RX
   * optional (evidence only): the STM32 reference transmitter fires the
     same codeword on the air, and a FRAME notification arrives over BLE
 """
@@ -53,8 +56,18 @@ async def main_async() -> tuple[bool, str]:
     else:
         evidence.append(
             f"status seq={status['sequence']} clock_hz={status.get('clock_hz')} "
-            f"edges={status.get('total_edges')}"
+            f"edges={status.get('total_edges')} mode={lib.status_mode_name(status)}"
         )
+
+    # The ESP boots in IDLE; FRAME notifications only exist in RX.
+    try:
+        ack = await session.set_mode(lib.MODE_RX)
+        evidence.append(
+            f"mode rx ack accepted_raw={ack.get('accepted_raw')} "
+            f"({lib.mode_name(lib.MODE_RX)})"
+        )
+    except Exception as error:
+        problems.append(f"could not switch the ESP to RX over BLE: {error}")
 
     try:
         await session.write(lib.build_tx_command(*target, 3))
@@ -63,9 +76,11 @@ async def main_async() -> tuple[bool, str]:
             problems.append(f"no ACK for TX_COMMAND within {ACK_TIMEOUT:.0f}s "
                             f"[{session.stats()}]")
         elif ack.get("accepted") is not True:
-            problems.append(f"ACK accepted={ack.get('accepted')!r}")
+            problems.append(f"ACK accepted={ack.get('accepted')!r} "
+                            f"raw={ack.get('accepted_raw')!r}")
         else:
-            evidence.append(f"ack accepted=1 for hopping=0x{target[0]:08X} "
+            evidence.append(f"ack accepted_raw={ack.get('accepted_raw')} "
+                            f"for hopping=0x{target[0]:08X} "
                             f"serial=0x{target[1]:07X} button=0x{target[2]:X}")
     except Exception as error:
         problems.append(f"TX_COMMAND/ACK over BLE failed: {error.__class__.__name__}: {error}")
@@ -92,6 +107,12 @@ async def main_async() -> tuple[bool, str]:
             stm32.close()
         except Exception as error:
             lib.iter_report("note:", f"optional STM32 step skipped: {error}")
+
+    # leave the radio in its boot default for the next test (T7 checks it)
+    try:
+        await session.set_mode(lib.MODE_IDLE, timeout=1.0)
+    except Exception:
+        pass
 
     try:
         await session.close()

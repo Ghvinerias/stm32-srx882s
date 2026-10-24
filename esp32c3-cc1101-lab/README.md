@@ -233,7 +233,7 @@ over all preceding bytes.
 * Pulse durations are microseconds, little-endian `uint16`.
 * Types: `FRAME=1`, `STATUS=2`, `TX_COMMAND=3`, `SCENARIO_COMMAND=4`, `ACK=5`,
   `OTA_CMD=6`, `OTA_RESP=7` (the OTA packets use their own payload layout, see
-  §8).
+  §8), `MODE_COMMAND=8` (see "Radio modes" below).
 * Frames on the air are 77 edge-to-edge intervals: 11 preamble + 1 header +
   65 data. `initial_level` is the level of the first interval (1 for a rising
   start).
@@ -241,9 +241,34 @@ over all preceding bytes.
   status words: capture clock Hz (1 000 000 on this port), total edges,
   dropped packets.
 * ACKs are the STM32 6-byte form (`version,type,for_type,accepted,crc16`) and go
-  only to the link the command arrived on.
+  only to the link the command arrived on. For TX_COMMAND / SCENARIO_COMMAND the
+  ACK is sent when the burst **ends**: `accepted` = 1 complete, 2 aborted by
+  `MODE idle`, 0 rejected (a second TX command during a burst is refused
+  immediately, not queued; an unknown scenario or a radio that cannot enter TX
+  is also 0). `accepted != 0` therefore still means "transmitted".
 * FRAME and STATUS are broadcast to both links. `dropped_packets` increments
   only when *no* link accepted the bytes.
+
+### Radio modes (MODE_COMMAND, type 8)
+
+* **IDLE** is the boot default: CC1101 in SIDLE, RMT receiver disabled, no FRAME
+  packets. **RX** is the listening mode. **TX** is transient: any TX_COMMAND or
+  scenario enters it and the mode that was active before (IDLE or RX) is restored
+  when the burst ends (`MODE rx` sent during a burst is applied afterwards).
+* `MODE_COMMAND` raw = `[ver=1][type=8][mode:u8][crc16 LE]` (5 bytes): mode 0 =
+  IDLE, 1 = RX. Reply: `ACK(for_type=8, accepted=1)`, or `accepted=0` for an
+  unknown mode. `MODE idle` during a burst aborts it after the frame on the air
+  (the TX ACK then carries `accepted=2`, within ~215 ms).
+* Text equivalents: `mode idle`, `mode rx`, bare `mode` prints
+  `MODE idle|rx|tx`.
+* **STATUS flags bits 2..3** (mask `0x000C`, `mode = (flags >> 2) & 3`) report the
+  current mode: `0` IDLE, `1` RX, `2` TX. A STATUS is sent immediately on every
+  mode change (IDLE/RX switch, TX start, TX end) in addition to the 1 s
+  heartbeat; order on the wire for a mode command is STATUS then ACK, for a
+  burst end STATUS (restored mode) then the TX ACK.
+* TX bursts take `frame_count` 1..255 (0 is treated as 1). Frames are streamed
+  one at a time with one frame queued ahead, so the 15.5 ms guard between frames
+  stays exact and the main loop keeps serving USB/BLE/STATUS during a ~27 s burst.
 
 `receiver_id` is `0xE1` / `0xE2` per unit (never `1`), so a mixed bench can tell
 ESP32 frames from STM32 frames.

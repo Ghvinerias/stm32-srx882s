@@ -1,8 +1,10 @@
 package com.eelab.rflab.send
 
 import com.eelab.rflab.protocol.AckPacket
+import com.eelab.rflab.protocol.ModeCommand
 import com.eelab.rflab.protocol.PacketCodec
 import com.eelab.rflab.protocol.PacketType
+import com.eelab.rflab.protocol.RadioMode
 import com.eelab.rflab.protocol.ScenarioCommand
 import com.eelab.rflab.queue.SendItemStatus
 import com.eelab.rflab.queue.SendQueueItem
@@ -63,11 +65,28 @@ class BatchSendEngine(
     private val events: Flow<TransportEvent>,
     private val sendPacket: suspend (rawPacket: ByteArray) -> Unit,
     private val ackTimeoutMs: Long = DEFAULT_ACK_TIMEOUT_MS,
+    private val perFrameTimeoutMs: Long = DEFAULT_PER_FRAME_TIMEOUT_MS,
 ) {
 
     init {
         require(ackTimeoutMs > 0) { "ackTimeoutMs must be positive: $ackTimeoutMs" }
+        require(perFrameTimeoutMs >= 0) { "perFrameTimeoutMs must not be negative: $perFrameTimeoutMs" }
     }
+
+    /**
+     * ACK budget for a `TX_COMMAND` of [frameCount] frames. The device ACKs
+     * when the burst *ends*, so the wait scales with the burst length:
+     * [ackTimeoutMs] plus [perFrameTimeoutMs] per frame (one HCS301 frame is
+     * about 105 ms on air including the guard; the default adds margin).
+     */
+    fun ackTimeoutFor(frameCount: Int): Long = ackTimeoutMs + frameCount.toLong() * perFrameTimeoutMs
+
+    /** Set by [stopTransmit]; checked between items so a batch ends cleanly. */
+    @Volatile
+    private var stopRequested = false
+
+    /** Serialises MODE commands among themselves (not with TX, see [setMode]). */
+    private val modeMutex = Mutex()
 
     /**
      * Serialises every send path through one engine instance, including
@@ -110,26 +129,32 @@ class BatchSendEngine(
         if (items.isEmpty()) return
 
         sendMutex.withLock {
+            stopRequested = false
             var inFlightId: Long? = null
             try {
                 for (item in items) {
+                    if (stopRequested) return
                     inFlightId = item.id
                     onStatusChange(item.id, SendItemStatus.SENDING)
 
                     val result = sendAndAwait(
                         rawPacket = PacketCodec.encodeTxCommand(item.toTxCommand()),
                         expectedForType = PacketType.TX_COMMAND,
+                        timeoutMs = ackTimeoutFor(item.frameCount),
                     )
 
                     when (result) {
-                        is AwaitResult.Acknowledged -> onStatusChange(
-                            item.id,
-                            if (result.accepted) {
-                                SendItemStatus.ACKED_OK
-                            } else {
-                                SendItemStatus.ACKED_FAILED
-                            },
-                        )
+                        is AwaitResult.Acknowledged -> {
+                            val status = when (result.result) {
+                                AckPacket.RESULT_OK -> SendItemStatus.ACKED_OK
+                                AckPacket.RESULT_ABORTED -> SendItemStatus.ABORTED
+                                else -> SendItemStatus.ACKED_FAILED
+                            }
+                            onStatusChange(item.id, status)
+                            // An aborted burst means the user stopped: do not
+                            // start the rest of the batch.
+                            if (status == SendItemStatus.ABORTED) return
+                        }
 
                         AwaitResult.TimedOut -> onStatusChange(item.id, SendItemStatus.TIMEOUT)
 
@@ -182,10 +207,14 @@ class BatchSendEngine(
                 val result = sendAndAwait(
                     rawPacket = PacketCodec.encodeScenarioCommand(cmd),
                     expectedForType = PacketType.SCENARIO_COMMAND,
+                    timeoutMs = ackTimeoutMs,
                 )
             ) {
-                is AwaitResult.Acknowledged ->
-                    if (result.accepted) SendItemStatus.ACKED_OK else SendItemStatus.ACKED_FAILED
+                is AwaitResult.Acknowledged -> when (result.result) {
+                    AckPacket.RESULT_OK -> SendItemStatus.ACKED_OK
+                    AckPacket.RESULT_ABORTED -> SendItemStatus.ABORTED
+                    else -> SendItemStatus.ACKED_FAILED
+                }
 
                 AwaitResult.TimedOut -> SendItemStatus.TIMEOUT
 
@@ -194,6 +223,35 @@ class BatchSendEngine(
                 -> SendItemStatus.FAILED
             }
         }
+    }
+
+    /**
+     * Commands the device into [mode] and waits for the type-8 ACK.
+     *
+     * Deliberately *not* under [sendMutex]: Stop must work while a batch holds
+     * it. ACKs are matched by `for_type`, so a MODE ACK can never be mistaken
+     * for a TX/scenario ACK. MODE commands are serialised among themselves.
+     *
+     * @return `true` when the device accepted the mode (`accepted = 1`);
+     *   `false` when it rejected it, timed out or the link failed.
+     */
+    suspend fun setMode(mode: RadioMode): Boolean = modeMutex.withLock {
+        val result = sendAndAwait(
+            rawPacket = PacketCodec.encodeModeCommand(ModeCommand(mode)),
+            expectedForType = PacketType.MODE_COMMAND,
+            timeoutMs = ackTimeoutMs,
+        )
+        result is AwaitResult.Acknowledged && result.result == AckPacket.RESULT_OK
+    }
+
+    /**
+     * Stops transmitting: marks the running batch to end after the in-flight
+     * item and sends MODE IDLE, which makes the device abort the burst (its
+     * TX ACK then reports `accepted = 2`). Safe to call when nothing is sending.
+     */
+    suspend fun stopTransmit(): Boolean {
+        stopRequested = true
+        return setMode(RadioMode.IDLE)
     }
 
     /**
@@ -210,6 +268,7 @@ class BatchSendEngine(
     private suspend fun sendAndAwait(
         rawPacket: ByteArray,
         expectedForType: Int,
+        timeoutMs: Long,
     ): AwaitResult = coroutineScope {
         val signal = CompletableDeferred<AwaitSignal>()
 
@@ -243,10 +302,10 @@ class BatchSendEngine(
                 return@coroutineScope AwaitResult.WriteFailed(error)
             }
 
-            val received = withTimeoutOrNull(ackTimeoutMs) { signal.await() }
+            val received = withTimeoutOrNull(timeoutMs) { signal.await() }
                 ?: return@coroutineScope AwaitResult.TimedOut
             when (received) {
-                is AwaitSignal.Ack -> AwaitResult.Acknowledged(received.packet.accepted)
+                is AwaitSignal.Ack -> AwaitResult.Acknowledged(received.packet.result)
                 AwaitSignal.LinkLost -> AwaitResult.LinkLost
             }
         } finally {
@@ -264,7 +323,7 @@ class BatchSendEngine(
     }
 
     private sealed interface AwaitResult {
-        data class Acknowledged(val accepted: Boolean) : AwaitResult
+        data class Acknowledged(val result: Int) : AwaitResult
 
         data object TimedOut : AwaitResult
 
@@ -281,5 +340,8 @@ class BatchSendEngine(
          * wide margin without stalling a disconnected UI for long.
          */
         const val DEFAULT_ACK_TIMEOUT_MS = 2_000L
+
+        /** Extra ACK budget per TX frame (about 105 ms on air, plus margin). */
+        const val DEFAULT_PER_FRAME_TIMEOUT_MS = 120L
     }
 }

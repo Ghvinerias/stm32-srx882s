@@ -60,6 +60,7 @@ class SendViewModel(
     ) -> Unit = ::stubBatchSender,
     private val favoritesRepository: FavoritesRepository,
     connectionStatus: Flow<Boolean> = flowOf(true),
+    private val stopSender: suspend () -> Boolean = { true },
 ) : ViewModel() {
 
     /** Guards against two overlapping "Send All" coroutines. */
@@ -193,7 +194,7 @@ class SendViewModel(
         publishQueue()
     }
 
-    /** Applies the protocol's `1..10` clamp in the repository. */
+    /** Applies the protocol's `1..255` clamp in the repository. */
     fun setFrameCount(itemId: Long, frameCount: Int) {
         sendQueue.setFrameCount(itemId, frameCount)
         publishQueue()
@@ -317,7 +318,10 @@ class SendViewModel(
 
         sendBatchJob = viewModelScope.launch {
             _uiState.update {
-                it.copy(message = "Sending ${snapshot.size} item(s) sequentially…")
+                it.copy(
+                    isSending = true,
+                    message = "Sending ${snapshot.size} item(s) sequentially…",
+                )
             }
 
             try {
@@ -338,6 +342,7 @@ class SendViewModel(
                     .forEach { sendQueue.setStatus(it.id, SendItemStatus.FAILED) }
             } finally {
                 publishQueue()
+                _uiState.update { it.copy(isSending = false) }
             }
 
             val sentIds = snapshot.mapTo(HashSet()) { it.id }
@@ -347,15 +352,39 @@ class SendViewModel(
             val timedOut = finalItems.count { it.status == SendItemStatus.TIMEOUT }
             val linkLost = finalItems.count { it.status == SendItemStatus.FAILED }
             val notSent = finalItems.count { it.status == SendItemStatus.PENDING }
+            val aborted = finalItems.count { it.status == SendItemStatus.ABORTED }
             _uiState.update {
                 it.copy(
-                    message = if (linkLost > 0 || notSent > 0) {
+                    message = if (aborted > 0) {
+                        "Stopped: $ok ACKed OK, $aborted aborted, $notSent not sent"
+                    } else if (linkLost > 0 || notSent > 0) {
                         "Batch stopped: $ok ACKed OK, $failed failed, $timedOut timed out, " +
                             "$linkLost link error(s), $notSent not sent"
                     } else {
                         "Batch done: $ok ACKed OK, $failed failed, $timedOut timed out"
                     },
                 )
+            }
+        }
+    }
+
+    /**
+     * Stop button: sends MODE IDLE, which aborts a running burst, and ends the
+     * batch after the in-flight item (the device reports the burst as aborted).
+     */
+    fun stopSending() {
+        if (!_uiState.value.isSending) return
+        viewModelScope.launch {
+            val ok = try {
+                stopSender()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                Log.w(TAG, "Stop failed", error)
+                false
+            }
+            if (!ok) {
+                _uiState.update { it.copy(message = "Stop was not acknowledged by the device") }
             }
         }
     }
@@ -388,6 +417,7 @@ class SendViewModel(
             ) -> Unit = ::stubBatchSender,
             favoritesRepository: FavoritesRepository,
             connectionStatus: Flow<Boolean> = flowOf(true),
+            stopSender: suspend () -> Boolean = { true },
         ): ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 SendViewModel(
@@ -395,6 +425,7 @@ class SendViewModel(
                     batchSender = batchSender,
                     favoritesRepository = favoritesRepository,
                     connectionStatus = connectionStatus,
+                    stopSender = stopSender,
                 )
             }
         }

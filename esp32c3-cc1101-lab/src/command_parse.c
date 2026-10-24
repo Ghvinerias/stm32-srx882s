@@ -4,12 +4,14 @@
 
 #include "lab_rx.h"
 #include "lab_tx.h"
+#include "radio_mode.h"
 #include "ota_session.h"
 
 // Incoming packet layouts (raw, before COBS encoding):
 //   TX_COMMAND:       [version][type][hopping LE32][serial LE32][button]
 //                     [frame_count][crc16 LE]  (14 bytes)
 //   SCENARIO_COMMAND: [version][type][command_char][crc16 LE]  (5 bytes)
+//   MODE_COMMAND:     [version][8][mode: 0 idle, 1 rx][crc16 LE]  (5 bytes)
 //
 // Input also accepts a human-typed ASCII alternative, e.g.
 // "tx 114766B9 FB58C0C 2 5\r\n".  Output stays binary (capture frames +
@@ -24,7 +26,6 @@
 #define LINK_COUNT 2U
 
 #define DEFAULT_FRAMES 3U
-#define MAX_FRAMES 10U
 
 typedef struct {
     uint8_t buffer[RX_BUFFER_MAX];
@@ -180,29 +181,52 @@ static void handle_binary_packet(uint8_t link, const uint8_t *encoded,
         return;
     }
 
-    int accepted = 0;
     if (type == PROTO_TYPE_TX_COMMAND && decoded_length == 14U) {
         uint32_t hopping = get_u32_le(&decoded[2]);
         uint32_t serial = get_u32_le(&decoded[6]);
         uint8_t button = decoded[10];
-        uint8_t frame_count = decoded[11];
-        // Enforce the same 1..10 range the text path clamps to and that
-        // PacketCodec validates on the host side.  Without this a buggy or
-        // hostile host could ask for 255 frames and block the device for
-        // tens of seconds.
-        if (frame_count == 0U) {
-            frame_count = 1U;
-        } else if (frame_count > MAX_FRAMES) {
-            frame_count = MAX_FRAMES;
+        uint8_t frame_count = decoded[11]; // 1..255, 0 means 1
+        // The burst is streamed; its ACK (1 complete / 2 aborted / 0 failed)
+        // is sent when it ends.  A refused start (busy, radio not ready) is
+        // answered at once with accepted = 0.
+        if (!lab_tx_start_codeword(hopping, serial, button, frame_count, type,
+                                   link) &&
+            proto_send_ack(type, 0U, link)) {
+            ++stats.acked;
         }
-        accepted = lab_tx_send_codeword(hopping, serial, button, frame_count);
-    } else if (type == PROTO_TYPE_SCENARIO_COMMAND && decoded_length == 5U) {
-        accepted = lab_tx_run_scenario(decoded[2]);
-    } else {
-        ++stats.rejected;
-        return; // Unrecognized/malformed: no ack, just drop.
+        return;
     }
-    if (proto_send_ack(type, accepted ? 1U : 0U, link)) {
+    if (type == PROTO_TYPE_SCENARIO_COMMAND && decoded_length == 5U) {
+        if (!lab_tx_start_scenario(decoded[2], type, link) &&
+            proto_send_ack(type, 0U, link)) {
+            ++stats.acked;
+        }
+        return;
+    }
+    if (type == PROTO_TYPE_MODE_COMMAND && decoded_length == 5U) {
+        int accepted = radio_mode_request(decoded[2]);
+        if (proto_send_ack(type, accepted ? 1U : 0U, link)) {
+            ++stats.acked;
+        }
+        return;
+    }
+    ++stats.rejected;
+    // Unrecognized/malformed: no ack, just drop.
+}
+
+// Result of a streamed TX burst: ACK the originating command, or print the
+// text reply for a typed command.
+static void tx_done(void *context, uint8_t kind, uint8_t link, uint8_t result) {
+    (void)context;
+    if (kind == LAB_TX_KIND_TEXT_TX || kind == LAB_TX_KIND_TEXT_RUN) {
+        const char *label = kind == LAB_TX_KIND_TEXT_TX ? "TX" : "RUN";
+        send_text(link, label);
+        send_text(link, result == LAB_TX_RESULT_COMPLETE  ? " DONE\r\n"
+                        : result == LAB_TX_RESULT_ABORTED ? " ABORTED\r\n"
+                                                           : " ERROR\r\n");
+        return;
+    }
+    if (proto_send_ack(kind, result, link)) {
         ++stats.acked;
     }
 }
@@ -229,12 +253,12 @@ static void execute_tx_text(uint8_t link, char *cursor) {
     if (frames == 0U) {
         frames = 1U;
     }
-    if (frames > MAX_FRAMES) {
-        frames = MAX_FRAMES;
+    if (frames > LAB_TX_MAX_FRAME_COUNT) {
+        frames = LAB_TX_MAX_FRAME_COUNT;
     }
 
-    int ok = lab_tx_send_codeword(hopping, serial, (uint8_t)button,
-                                  (uint8_t)frames);
+    int ok = lab_tx_start_codeword(hopping, serial, (uint8_t)button,
+                                   (uint8_t)frames, LAB_TX_KIND_TEXT_TX, link);
     send_text(link, "TX hopping=0x");
     send_hex(link, hopping, 8);
     send_text(link, " serial=0x");
@@ -242,8 +266,9 @@ static void execute_tx_text(uint8_t link, char *cursor) {
     send_text(link, " button=0x");
     send_hex(link, button, 1);
     send_text(link, " frames=");
-    send_hex(link, frames, 1);
-    send_text(link, ok ? " DONE\r\n" : " ERROR\r\n");
+    send_hex(link, frames, 2);
+    // The burst result ("TX DONE" / "TX ABORTED") follows when it ends.
+    send_text(link, ok ? " START\r\n" : " BUSY\r\n");
 }
 
 static void execute_rxpair_text(uint8_t link, char *cursor) {
@@ -348,6 +373,7 @@ static void execute_help_text(uint8_t link) {
               "<replay 0|1>\r\n"
               "  rxsim <hopping> <serial> <button>\r\n"
               "  radio\r\n"
+              "  mode [idle|rx]  (radio mode; boots in idle)\r\n"
               "  txtest [pad]  (1 ms square wave x200 on GPIO3)\r\n"
               "  txtest gpio  (plain bit-bang of GPIO3, no RMT)\r\n"
               "  carrier  (CC1101 continuous carrier ~2 s)\r\n"
@@ -429,6 +455,30 @@ static void execute_regs_text(uint8_t link) {
     send_text(link, report);
 }
 
+static void execute_mode_text(uint8_t link, char *cursor) {
+    char *value = next_token(&cursor);
+    char *extra = next_token(&cursor);
+    if (extra != NULL) {
+        send_text(link, "Usage: mode [idle|rx]\r\n");
+        return;
+    }
+    if (value != NULL) {
+        uint8_t mode;
+        if (strcmp(value, "idle") == 0) {
+            mode = RADIO_MODE_IDLE;
+        } else if (strcmp(value, "rx") == 0) {
+            mode = RADIO_MODE_RX;
+        } else {
+            send_text(link, "Usage: mode [idle|rx]\r\n");
+            return;
+        }
+        (void)radio_mode_request(mode);
+    }
+    send_text(link, "MODE ");
+    send_text(link, radio_mode_name(radio_mode_current()));
+    send_text(link, "\r\n");
+}
+
 static void execute_ook_text(uint8_t link, char *cursor) {
     char *value_text = next_token(&cursor);
     char *extra = next_token(&cursor);
@@ -500,6 +550,10 @@ static void handle_text_line(uint8_t link, char *line) {
         execute_regs_text(link);
         return;
     }
+    if (strcmp(first, "mode") == 0) {
+        execute_mode_text(link, cursor);
+        return;
+    }
     if (strcmp(first, "txtest") == 0) {
         execute_txtest_text(link, cursor);
         return;
@@ -510,8 +564,8 @@ static void handle_text_line(uint8_t link, char *line) {
     }
     uint8_t command;
     if (*cursor == '\0' && scenario_for_name(first, &command)) {
-        int ok = lab_tx_run_scenario(command);
-        send_text(link, ok ? "RUN DONE\r\n" : "RUN ERROR\r\n");
+        int ok = lab_tx_start_scenario(command, LAB_TX_KIND_TEXT_RUN, link);
+        send_text(link, ok ? "RUN START\r\n" : "RUN BUSY\r\n");
         return;
     }
     send_text(link,
@@ -528,6 +582,7 @@ void command_parse_init(const proto_sink_t *sink, const command_ops_t *ops) {
         rx_states[i].pending_eol = 0U;
     }
     lab_rx_init();
+    lab_tx_set_done(tx_done, NULL);
 }
 
 void command_parse_reset_link(uint8_t link) {

@@ -21,6 +21,18 @@ bool radio_rmt_init(void);
 // a high level.  Returns 1 when the RMT transaction completed.
 int radio_rmt_transmit(const uint16_t *pulses, size_t pulse_count);
 
+// Streamed (non-blocking) transmit of one frame: 1 queued, 0 queue full,
+// -1 error.  At most 2 frames are in flight; the done ISR counts them down.
+int radio_rmt_tx_queue(const uint16_t *pulses, size_t pulse_count);
+unsigned radio_rmt_tx_inflight(void);
+void radio_rmt_tx_reset(void); // abort whatever is queued
+
+// Receiver on/off follows the radio mode: IDLE keeps the RMT RX channel
+// disabled (rx_arm/rx_resume are no-ops).  apply_now=false only records the
+// wish (used while an OTA session owns the receiver).
+void radio_rmt_set_rx_wanted(bool wanted, bool apply_now);
+bool radio_rmt_rx_wanted(void);
+
 bool radio_rmt_rx_arm(void);
 bool radio_rmt_rx_armed(void);
 void radio_rmt_rx_suspend(void);

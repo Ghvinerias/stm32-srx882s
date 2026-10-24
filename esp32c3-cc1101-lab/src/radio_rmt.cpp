@@ -53,12 +53,23 @@ static uint32_t stat_last_tx_us;
 static uint32_t stat_expected_tx_us;
 static uint32_t total_edges;
 
+static volatile unsigned tx_inflight; // transactions queued, not yet finished
+static volatile bool rx_wanted;       // radio mode RX (false in IDLE)
+// Two payload buffers for the streamed TX: the RMT copy encoder reads the
+// symbols while the frame is on the air, so the buffer of the frame that is
+// still in flight must not be reused.
+static rmt_symbol_word_t tx_async_symbols[2][(LAB_FRAME_PULSES + 1U) / 2U + 1U];
+static unsigned tx_async_next;
+
 static bool IRAM_ATTR on_tx_done(rmt_channel_handle_t channel,
                                  const rmt_tx_done_event_data_t *event,
                                  void *user_ctx) {
     (void)channel;
     (void)event;
     (void)user_ctx;
+    if (tx_inflight > 0U) {
+        tx_inflight = tx_inflight - 1U;
+    }
     BaseType_t woken = pdFALSE;
     xSemaphoreGiveFromISR(tx_done_semaphore, &woken);
     return woken == pdTRUE;
@@ -164,10 +175,11 @@ bool radio_rmt_init(void) {
     return true;
 }
 
-static size_t pack_symbols(const uint16_t *pulses, size_t pulse_count) {
+static size_t pack_symbols_into(rmt_symbol_word_t *dest, const uint16_t *pulses,
+                                size_t pulse_count) {
     size_t symbol_count = 0;
     for (size_t i = 0; i < pulse_count; i += 2U) {
-        rmt_symbol_word_t *symbol = &tx_symbols[symbol_count++];
+        rmt_symbol_word_t *symbol = &dest[symbol_count++];
         symbol->duration0 = pulses[i];
         symbol->level0 = (i & 1U) == 0U ? 1U : 0U;
         if (i + 1U < pulse_count) {
@@ -179,6 +191,50 @@ static size_t pack_symbols(const uint16_t *pulses, size_t pulse_count) {
         }
     }
     return symbol_count;
+}
+
+static size_t pack_symbols(const uint16_t *pulses, size_t pulse_count) {
+    return pack_symbols_into(tx_symbols, pulses, pulse_count);
+}
+
+int radio_rmt_tx_queue(const uint16_t *pulses, size_t pulse_count) {
+    if (!tx_channel || !copy_encoder || !pulses || pulse_count == 0U ||
+        pulse_count > LAB_FRAME_PULSES) {
+        return -1;
+    }
+    if (tx_inflight >= 2U) {
+        return 0; // never block: the caller retries on its next poll
+    }
+    rmt_symbol_word_t *symbols = tx_async_symbols[tx_async_next];
+    size_t symbol_count = pack_symbols_into(symbols, pulses, pulse_count);
+    rmt_transmit_config_t transmit_config = {};
+    transmit_config.loop_count = 0;
+    transmit_config.flags.eot_level = 0;
+    tx_inflight = tx_inflight + 1U; // before: the done ISR may fire at once
+    esp_err_t err = rmt_transmit(tx_channel, copy_encoder, symbols,
+                                 symbol_count * sizeof(rmt_symbol_word_t),
+                                 &transmit_config);
+    if (err != ESP_OK) {
+        if (tx_inflight > 0U) {
+            tx_inflight = tx_inflight - 1U;
+        }
+        stat_tx_failures++;
+        return -1;
+    }
+    tx_async_next ^= 1U;
+    stat_tx_count++;
+    return 1;
+}
+
+unsigned radio_rmt_tx_inflight(void) { return tx_inflight; }
+
+void radio_rmt_tx_reset(void) {
+    if (tx_channel) {
+        (void)rmt_disable(tx_channel);
+        (void)rmt_enable(tx_channel);
+    }
+    tx_inflight = 0U;
+    tx_async_next = 0U;
 }
 
 int radio_rmt_transmit(const uint16_t *pulses, size_t pulse_count) {
@@ -204,9 +260,13 @@ int radio_rmt_transmit(const uint16_t *pulses, size_t pulse_count) {
     transmit_config.loop_count = 0;
     transmit_config.flags.eot_level = 0;
 
+    tx_inflight = tx_inflight + 1U;
     esp_err_t err = rmt_transmit(
         tx_channel, copy_encoder, tx_symbols,
         symbol_count * sizeof(rmt_symbol_word_t), &transmit_config);
+    if (err != ESP_OK && tx_inflight > 0U) {
+        tx_inflight = tx_inflight - 1U;
+    }
     int ok = 0;
     if (err == ESP_OK &&
         xSemaphoreTake(tx_done_semaphore, pdMS_TO_TICKS(timeout_ms)) ==
@@ -218,6 +278,7 @@ int radio_rmt_transmit(const uint16_t *pulses, size_t pulse_count) {
         // Abort and re-arm the channel so the next attempt starts clean.
         (void)rmt_disable(tx_channel);
         (void)rmt_enable(tx_channel);
+        tx_inflight = 0U;
     }
 
     stat_last_tx_us = (uint32_t)(esp_timer_get_time() - tx_started_us);
@@ -230,7 +291,7 @@ int radio_rmt_transmit(const uint16_t *pulses, size_t pulse_count) {
 }
 
 bool radio_rmt_rx_arm(void) {
-    if (!rx_channel || rx_armed) {
+    if (!rx_channel || rx_armed || !rx_wanted) {
         return rx_armed;
     }
 
@@ -259,9 +320,25 @@ void radio_rmt_rx_suspend(void) {
     rx_armed = false;
 }
 
+void radio_rmt_set_rx_wanted(bool wanted, bool apply_now) {
+    rx_wanted = wanted;
+    if (!wanted) {
+        radio_rmt_rx_suspend();
+        // Drop captures that completed before the switch to IDLE so no stale
+        // FRAME is sent afterwards.
+        if (rx_queue) {
+            xQueueReset(rx_queue);
+        }
+    } else if (apply_now) {
+        radio_rmt_rx_resume();
+    }
+}
+
+bool radio_rmt_rx_wanted(void) { return rx_wanted; }
+
 void radio_rmt_rx_resume(void) {
-    if (!rx_channel) {
-        return;
+    if (!rx_channel || !rx_wanted) {
+        return; // IDLE mode: the receiver stays off
     }
     (void)rmt_enable(rx_channel);
     rx_armed = false;

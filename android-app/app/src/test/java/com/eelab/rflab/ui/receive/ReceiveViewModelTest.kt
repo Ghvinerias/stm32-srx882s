@@ -2,11 +2,13 @@ package com.eelab.rflab.ui.receive
 
 import com.eelab.rflab.decode.CaptureFixtures
 import com.eelab.rflab.decode.DecodedSignal
+import com.eelab.rflab.protocol.RadioMode
 import com.eelab.rflab.queue.SendQueueRepository
 import com.eelab.rflab.testing.MainDispatcherRule
 import com.eelab.rflab.usb.TransportEvent
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -340,4 +342,97 @@ class ReceiveViewModelTest {
             initialLevel = 0,
             receiverId = 1,
         )
+
+    // --- Radio mode control -------------------------------------------------
+
+    @Test
+    fun displayedModeComesFromDeviceStatusNotFromTheRequest() = runTest {
+        val modes = MutableSharedFlow<RadioMode>(extraBufferCapacity = 8)
+        val requested = mutableListOf<RadioMode>()
+        val viewModel = ReceiveViewModel(
+            signals, sendQueue, clock = { nowMs },
+            deviceModes = modes,
+            connected = flowOf(true),
+            modeSetter = { requested += it; true },
+        )
+        assertEquals(RadioMode.IDLE, viewModel.uiState.value.mode)
+
+        viewModel.toggleReceiving()
+        assertEquals(listOf(RadioMode.RX), requested)
+        // ACKed, but no STATUS yet: still shown as Idle.
+        assertEquals(RadioMode.IDLE, viewModel.uiState.value.mode)
+
+        modes.emit(RadioMode.RX)
+        assertEquals(RadioMode.RX, viewModel.uiState.value.mode)
+
+        viewModel.toggleReceiving()
+        assertEquals(listOf(RadioMode.RX, RadioMode.IDLE), requested)
+    }
+
+    @Test
+    fun disconnectShowsIdleAndNothingAutoStartsOnReconnect() = runTest {
+        val modes = MutableSharedFlow<RadioMode>(extraBufferCapacity = 8)
+        val connected = MutableStateFlow(true)
+        val requested = mutableListOf<RadioMode>()
+        val viewModel = ReceiveViewModel(
+            signals, sendQueue, clock = { nowMs },
+            deviceModes = modes,
+            connected = connected,
+            modeSetter = { requested += it; true },
+        )
+        modes.emit(RadioMode.RX)
+        assertEquals(RadioMode.RX, viewModel.uiState.value.mode)
+
+        connected.value = false
+        assertEquals(RadioMode.IDLE, viewModel.uiState.value.mode)
+        assertFalse(viewModel.uiState.value.canToggleReceive)
+
+        connected.value = true
+        assertEquals(RadioMode.IDLE, viewModel.uiState.value.mode)
+        assertTrue(requested.isEmpty())
+    }
+
+    @Test
+    fun toggleIsBlockedWhileTransmittingAndFailureIsReported() = runTest {
+        val modes = MutableSharedFlow<RadioMode>(extraBufferCapacity = 8)
+        var calls = 0
+        val viewModel = ReceiveViewModel(
+            signals, sendQueue, clock = { nowMs },
+            deviceModes = modes,
+            modeSetter = { calls++; false },
+        )
+        modes.emit(RadioMode.TX)
+        viewModel.toggleReceiving()
+        assertEquals(0, calls)
+
+        modes.emit(RadioMode.IDLE)
+        viewModel.toggleReceiving()
+        assertEquals(1, calls)
+        assertTrue(viewModel.uiState.value.modeMessage != null)
+        assertFalse(viewModel.uiState.value.modeBusy)
+    }
+
+    @Test
+    fun framesWhileIdleKeepStartAvailableAndFlagTheMismatch() = runTest {
+        val modes = MutableSharedFlow<RadioMode>(extraBufferCapacity = 8)
+        val frames = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
+        val requested = mutableListOf<RadioMode>()
+        val viewModel = ReceiveViewModel(
+            signals, sendQueue, clock = { nowMs },
+            deviceModes = modes,
+            frameArrivals = frames,
+            modeSetter = { requested += it; true },
+        )
+        // STM32 reference board: streams FRAMEs, reports IDLE forever.
+        frames.emit(Unit)
+        emit(1_000)
+        assertTrue(viewModel.uiState.value.framesWhileIdle)
+        assertEquals(1, viewModel.uiState.value.rows.size) // never hidden
+        assertTrue(viewModel.uiState.value.canToggleReceive)
+        viewModel.toggleReceiving()
+        assertEquals(listOf(RadioMode.RX), requested)
+
+        modes.emit(RadioMode.RX)
+        assertFalse(viewModel.uiState.value.framesWhileIdle)
+    }
 }

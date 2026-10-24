@@ -3,6 +3,9 @@
 presses the real 433.92 MHz remote near the CC1101 antenna.  Prints every FRAME
 (pulse count, decode result) and the raw RMT counters before/after.
 
+The radio boots in IDLE (RMT RX off), so this switches it to RX first and back
+to IDLE when it finishes.
+
     HIL_ESP_PORT=... ~/venv/bin/python watch_rx.py [seconds]
 """
 import sys
@@ -15,6 +18,12 @@ def main() -> int:
     seconds = float(sys.argv[1]) if len(sys.argv) > 1 else 60.0
     device = lib.open_device(lib.esp_port(), "esp")
     try:
+        try:
+            ack = device.set_mode(lib.MODE_RX)
+            print(f"mode rx ack accepted_raw={ack.get('accepted_raw')}")
+        except Exception as error:
+            print(f"WATCH_RX: FAIL could not switch the radio to RX: {error}")
+            return 1
         device.clear()
         device.send_text("radio")
         before = device.wait_line("RMT", timeout=3.0)
@@ -55,6 +64,11 @@ def main() -> int:
               "| buttons:", sorted({b for _, _, b in decoded_set}))
         if good:
             print("serial constant:", len(sers) == 1, "| hopping changes between presses:", len(hops) > 1)
+        try:
+            idle_ack = device.set_mode(lib.MODE_IDLE)
+            print(f"mode idle ack accepted_raw={idle_ack.get('accepted_raw')}")
+        except Exception as error:
+            print(f"note: could not switch back to IDLE: {error}")
         print("WATCH_RX:", "PASS" if good else "NO DECODED FRAME")
         return 0 if good else 1
     finally:

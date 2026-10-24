@@ -17,3 +17,5 @@ dist/
 flashsite/fw/
 tests/test_cc1101_regs
 tests/test_hcs_reduce
+tests/test_mode
+tests/test_stream

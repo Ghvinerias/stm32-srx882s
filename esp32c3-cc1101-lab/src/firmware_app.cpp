@@ -16,6 +16,7 @@
 #include "ota_backend.h"
 #include "ota_session.h"
 #include "proto_transport.h"
+#include "radio_mode.h"
 #include "radio_rmt.h"
 #include "usb_tx_policy.h"
 
@@ -64,33 +65,81 @@ static uint8_t link_write(void *context, uint8_t targets,
     return delivered;
 }
 
-static int emit_burst(void *context, const uint16_t *pulses,
-                      size_t pulse_count) {
-    (void)context;
+// ---- radio modes (IDLE / RX / transient TX) ----------------------------------
 
+static void send_status_now(void) {
+    (void)proto_send_status(1000000U, radio_rmt_dropped_frames(),
+                            radio_rmt_total_edges(), PROTO_LINK_ALL);
+    last_status_ms = millis();
+}
+
+// Put the hardware into the base mode.  Also used after the bench self-tests
+// that borrow the radio.  An OTA session owns the RMT receiver while it
+// writes flash, so the receiver is only re-enabled once that ends.
+static void apply_base_mode(void *context, uint8_t base) {
+    (void)context;
+    if (base == RADIO_MODE_RX) {
+        if (cc1101_is_initialized()) {
+            (void)cc1101_set_rx();
+        }
+        radio_rmt_set_rx_wanted(true, ota_session_rx_suspended() == 0);
+    } else {
+        radio_rmt_set_rx_wanted(false, false);
+        if (cc1101_is_initialized()) {
+            cc1101_idle();
+        }
+    }
+}
+
+static void restore_radio(void) { apply_base_mode(NULL, radio_mode_base()); }
+
+static void mode_changed(void *context, uint8_t mode) {
+    (void)context;
+    proto_set_mode(mode);
+    send_status_now(); // the app's UI follows the device, not its own guess
+}
+
+static void mode_abort_tx(void *context) {
+    (void)context;
+    lab_tx_abort();
+}
+
+static int tx_hw_begin(void *context) {
+    (void)context;
     if (!cc1101_is_initialized()) {
         return 0;
     }
-
-    // The CC1101 is half-duplex: stop listening, switch to TX, emit, then go
-    // back to RX and re-arm the capture channel.  An OTA session owns the RX
-    // channel from BEGIN to END/ABORT, so do not re-arm it behind the session's
-    // back when a TX command arrives in the middle of an upload.
-    bool ota_holds_rx = ota_session_rx_suspended() != 0;
     digitalWrite(LAB_PIN_STATUS_LED, LOW);
     radio_rmt_rx_suspend();
-
-    int ok = 0;
-    if (cc1101_set_tx()) {
-        ok = radio_rmt_transmit(pulses, pulse_count);
+    if (!cc1101_set_tx()) {
+        digitalWrite(LAB_PIN_STATUS_LED, HIGH);
+        restore_radio();
+        return 0;
     }
-    (void)cc1101_set_rx();
-    if (!ota_holds_rx) {
-        radio_rmt_rx_resume();
-    }
+    radio_mode_tx_begin(); // reports mode TX
+    return 1;
+}
 
+static int tx_hw_queue(void *context, const uint16_t *pulses, size_t count) {
+    (void)context;
+    return radio_rmt_tx_queue(pulses, count);
+}
+
+static unsigned tx_hw_inflight(void *context) {
+    (void)context;
+    return radio_rmt_tx_inflight();
+}
+
+static void tx_hw_end(void *context, int aborted) {
+    (void)context;
+    (void)aborted;
     digitalWrite(LAB_PIN_STATUS_LED, HIGH);
-    return ok;
+    radio_mode_tx_end(); // restores IDLE/RX and reports it
+}
+
+static uint32_t tx_now_ms(void *context) {
+    (void)context;
+    return millis();
 }
 
 static void radio_report_cb(char *out, size_t capacity) {
@@ -99,6 +148,11 @@ static void radio_report_cb(char *out, size_t capacity) {
     // timeouts can tell "never arrived" from "arrived, rejected" from
     // "handled, ACK not delivered".
     size_t used = strlen(out);
+    if (used < capacity) {
+        used += (size_t)snprintf(out + used, capacity - used, "MODE %s base=%s\r\n",
+                                 radio_mode_name(radio_mode_current()),
+                                 radio_mode_name(radio_mode_base()));
+    }
     radio_rmt_stats_t rmt = radio_rmt_stats();
     if (used < capacity) {
         used += (size_t)snprintf(out + used, capacity - used,
@@ -137,7 +191,9 @@ static void radio_report_cb(char *out, size_t capacity) {
 }
 
 static int ook_preset_cb(unsigned khz) {
-    return cc1101_set_preset(khz) ? 1 : 0;
+    int ok = cc1101_set_preset(khz) ? 1 : 0;
+    restore_radio(); // cc1101_set_preset() ends in RX
+    return ok;
 }
 
 static void diag_cb(const char *name, char *out, size_t capacity) {
@@ -189,11 +245,11 @@ static void diag_cb(const char *name, char *out, size_t capacity) {
         radio_rmt_rx_suspend();
         cc1101_reg_sweep(out, capacity);
         (void)cc1101_init(CC1101_PRESET_OOK270);
-        radio_rmt_rx_resume();
+        restore_radio();
     } else if (strcmp(name, "reinit") == 0) {
         radio_rmt_rx_suspend();
         bool ok = cc1101_init(CC1101_PRESET_OOK270);
-        radio_rmt_rx_resume();
+        restore_radio();
         char desc[160];
         cc1101_describe(desc, sizeof(desc));
         snprintf(out, capacity, "REINIT ok=%d %s", ok ? 1 : 0, desc);
@@ -208,6 +264,10 @@ static void regs_dump_cb(char *out, size_t capacity) {
 
 static void tx_selftest_cb(int mode, char *out, size_t capacity) {
     static uint16_t pulses[400];
+    if (lab_tx_busy()) {
+        snprintf(out, capacity, "TXTEST busy (a TX burst is running)\r\n");
+        return;
+    }
     size_t count;
     uint32_t expected_us;
     if (mode == COMMAND_TEST_GPIO) {
@@ -216,7 +276,7 @@ static void tx_selftest_cb(int mode, char *out, size_t capacity) {
         }
         radio_rmt_rx_suspend();
         int ok = radio_rmt_gpio_bitbang(pulses, 400U);
-        radio_rmt_rx_resume();
+        restore_radio();
         snprintf(out, capacity,
                  "TXTEST gpio ok=%d (bit-bang, RMT TX channel rebuilt)\r\n", ok);
         return;
@@ -247,9 +307,8 @@ static void tx_selftest_cb(int mode, char *out, size_t capacity) {
     } else if (cc1101_is_initialized() && cc1101_set_tx()) {
         keyed = 1;
         ok = radio_rmt_transmit(pulses, count);
-        (void)cc1101_set_rx();
     }
-    radio_rmt_rx_resume();
+    restore_radio();
     radio_rmt_stats_t rmt = radio_rmt_stats();
     snprintf(out, capacity, "%s ok=%d cc1101_tx=%d tx_us=%u expected=%u\r\n",
              mode == COMMAND_TEST_CARRIER ? "CARRIER"
@@ -301,9 +360,10 @@ void firmware_app_init(void) {
     if (!radio_ok || !rmt_ok) {
         boot_flags |= PROTO_FLAG_CAPTURE_INIT_FAILED;
     }
-    if (rmt_ok) {
-        (void)radio_rmt_rx_arm();
-    }
+    // Boot default is IDLE: CC1101 in SIDLE, RMT receiver disabled.
+    radio_mode_ops_t mode_ops = {apply_base_mode, mode_changed, mode_abort_tx, NULL};
+    radio_mode_init(&mode_ops);
+    restore_radio();
 
     ble_ready = ble_serial_init();
     transport_sink.write = link_write;
@@ -320,7 +380,9 @@ void firmware_app_init(void) {
     ota_backend_init();
     ota_session_init(ota_backend_get());
 
-    lab_tx_init(emit_burst, NULL);
+    lab_tx_ops_t tx_ops = {tx_hw_begin, tx_hw_queue, tx_hw_inflight, tx_hw_end,
+                           tx_now_ms, NULL};
+    lab_tx_init(&tx_ops);
 
     last_status_ms = millis();
     boot_ms = last_status_ms;
@@ -378,14 +440,23 @@ void firmware_app_loop(void) {
         command_parse_feed(PROTO_LINK_BLE, buffer, ble_bytes);
     }
 
+    // ---- streamed TX burst: queue frames, detect the end, send the ACK ----
+    lab_tx_poll();
+
     // ---- captured frames ----
     // Re-arm before each send: the next frame of a remote's burst starts
     // ~7 ms after the RX-done event, while a FRAME over BLE (several paced
     // notify chunks) or a slow USB host can hold the loop longer than that.
     // The ISR already copied the symbols out, so the RMT buffer is free.
-    rx_rearm(now);
+    bool listening = radio_mode_current() == RADIO_MODE_RX;
+    if (listening) {
+        rx_rearm(now);
+    }
     capture_frame_t frame;
     while (radio_rmt_rx_pop(&frame)) {
+        if (!listening) {
+            continue; // IDLE/TX: nothing may be reported as received
+        }
         rx_rearm(now);
         (void)proto_send_frame(&frame, radio_rmt_dropped_frames(),
                                PROTO_LINK_ALL);
@@ -393,10 +464,14 @@ void firmware_app_loop(void) {
         delayMicroseconds(200);
         digitalWrite(LAB_PIN_STATUS_LED, HIGH);
     }
-    rx_rearm(now);
+    if (listening) {
+        rx_rearm(now);
+    }
 
     // ---- STATUS heartbeat ----
-    if ((uint32_t)(now - last_status_ms) >= 1000U) {
+    // Signed compare: an immediate mode-change STATUS may have refreshed
+    // last_status_ms after `now` was sampled at the top of this iteration.
+    if ((int32_t)(now - last_status_ms) >= 1000) {
         last_status_ms = now;
         // Always attempt USB (this is what wakes a passive host's link up);
         // BLE only once the phone has subscribed to notifications.

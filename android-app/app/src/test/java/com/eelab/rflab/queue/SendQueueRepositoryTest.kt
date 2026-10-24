@@ -70,8 +70,8 @@ class SendQueueRepositoryTest {
         repository.setFrameCount(item.id, 0)
         assertEquals(1, repository.items.value.single().frameCount)
 
-        repository.setFrameCount(item.id, 99)
-        assertEquals(10, repository.items.value.single().frameCount)
+        repository.setFrameCount(item.id, 999)
+        assertEquals(255, repository.items.value.single().frameCount)
 
         repository.setFrameCount(item.id, 6)
         assertEquals(6, repository.items.value.single().frameCount)

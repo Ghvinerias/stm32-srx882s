@@ -134,7 +134,11 @@ fun RfLabApp() {
     }
     // Activity-scoped so it outlives tab navigation and decodes continuously.
     val receiveViewModel: ReceiveViewModel = viewModel(
-        factory = ReceiveViewModel.factory(RfLabSession.events),
+        factory = ReceiveViewModel.factory(
+            transportEvents = RfLabSession.events,
+            connected = RfLabSession.isConnected,
+            modeSetter = sendEngine::setMode,
+        ),
     )
 
     Scaffold(

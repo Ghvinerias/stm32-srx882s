@@ -8,15 +8,9 @@
 
 #include "test_util.h"
 
-static int emit_calls;
+#include "fake_radio.h"
 
-static int fake_emit(void *context, const uint16_t *pulses, size_t count) {
-    (void)context;
-    (void)pulses;
-    (void)count;
-    ++emit_calls;
-    return 1;
-}
+static fake_radio_t radio;
 
 static void put_u32_le(uint8_t *out, uint32_t value) {
     for (int i = 0; i < 4; ++i) {
@@ -66,13 +60,15 @@ static int send_chunked(uint8_t link, const uint8_t *wire, size_t length,
                         size_t chunk, uint8_t for_type) {
     rec_reset(&links.usb);
     rec_reset(&links.ble);
-    emit_calls = 0;
+    radio.bursts = 0U;
+    radio.frames_queued = 0U;
     for (size_t off = 0; off < length; off += chunk) {
         size_t n = length - off < chunk ? length - off : chunk;
         command_parse_feed(link, wire + off, n);
     }
+    fake_pump(&radio);
     const rec_t *rec = link == PROTO_LINK_USB ? &links.usb : &links.ble;
-    return emit_calls == 1 && ack_is(rec, for_type);
+    return radio.bursts == 1U && ack_is(rec, for_type);
 }
 
 int main(void) {
@@ -81,7 +77,7 @@ int main(void) {
     proto_sink_t sink = {link_write, &links};
     proto_init(&sink, 0U);
     command_parse_init(&sink, NULL);
-    lab_tx_init(fake_emit, NULL);
+    fake_radio_init(&radio);
 
     uint8_t wire[64];
     size_t n = app_tx_packet(wire, 0x114766B9U, 0x0FB58C0CU, 2U, 3U);

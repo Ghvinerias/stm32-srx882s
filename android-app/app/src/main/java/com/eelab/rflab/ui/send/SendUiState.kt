@@ -11,6 +11,7 @@ import com.eelab.rflab.queue.SendQueueItem
  * @property manualEntry four-field manual-entry form and its validation errors.
  * @property message short feedback line for the last add/send/clear/favorite
  *   action.
+ * @property isSending a batch is in flight; the screen offers Stop instead of Send All.
  * @property isConnected whether the shared USB session currently has a live
  *   connection. Queue editing stays available offline; sending does not.
  * @property favorites saved queue snapshots, newest first.
@@ -21,10 +22,11 @@ data class SendUiState(
     val manualEntry: ManualEntryState = ManualEntryState(),
     val message: String? = null,
     val isConnected: Boolean = true,
+    val isSending: Boolean = false,
     val favorites: List<FavoriteQueue> = emptyList(),
     val favoriteName: String = "",
 ) {
-    val canSendAll: Boolean get() = items.isNotEmpty() && isConnected
+    val canSendAll: Boolean get() = items.isNotEmpty() && isConnected && !isSending
 
     val canClearQueue: Boolean get() = items.isNotEmpty()
 
@@ -39,7 +41,7 @@ data class SendUiState(
  * instead of silently dropped. Errors are populated by
  * [SendViewModel.addManualEntry] and cleared as soon as the field changes.
  *
- * @property framesText decimal frame count, `1..10`.
+ * @property framesText decimal frame count, `1..255`.
  */
 data class ManualEntryState(
     val hoppingHex: String = "",

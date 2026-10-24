@@ -35,6 +35,12 @@ enum class SendItemStatus {
      * reached the board, and nothing is known about whether it was executed.
      */
     FAILED,
+
+    /**
+     * The device stopped this burst early (ACK `accepted = 2`), normally
+     * because the user pressed Stop. Ends the batch; later items stay [PENDING].
+     */
+    ABORTED,
 }
 
 /**
@@ -44,7 +50,7 @@ enum class SendItemStatus {
  * @property hopping 32-bit hopping word as captured or entered manually.
  * @property serial 28-bit serial number as captured or entered manually.
  * @property button button nibble, `0x0..0xF`.
- * @property frameCount number of frames to transmit, `1..10`. Editable from
+ * @property frameCount number of frames to transmit, `1..255`. Editable from
  *   the send screen; [SendQueueRepository.setFrameCount] applies the clamp.
  * @property status batch-send progress. Starts [SendItemStatus.PENDING] and is
  *   only changed by the batch send engine.
@@ -167,7 +173,7 @@ class SendQueueRepository {
 
     /**
      * Sets [frameCount] on the item with [id], clamped to the protocol's
-     * `1..10` range.
+     * `1..255` range.
      *
      * @return true if the item exists.
      */

@@ -5,6 +5,8 @@
     port opening (this is the parser's primary warm-up check)
   * a binary TX_COMMAND sent over the same stream is answered with an ACK
     with accepted=1
+  * MODE_COMMAND rx is sent next: the device boots in IDLE (no FRAME
+    packets), so RX is a precondition for the receive step
   * while the TX_command radio path is idle, the STM32 reference transmitter
     fires the codeword; the ESP receiver emits a FRAME packet on its own
     USB stream whose decoded fields match
@@ -50,7 +52,23 @@ def main() -> int:
                 for key, value in status.items()
                 if key in ("clock_hz", "total_edges", "dropped_packets", "sequence")
             }
-            evidence.append(f"status {words}")
+            evidence.append(f"status {words} mode={lib.status_mode_name(status)}")
+
+        # --- MODE_COMMAND rx (boot default is IDLE) -----------------------
+        try:
+            ack = esp.set_mode(lib.MODE_RX)
+            evidence.append(f"mode rx ack accepted_raw={ack.get('accepted_raw')}")
+            status = esp.wait_status_mode(lib.MODE_RX, 1.0)
+            if status is None:
+                problems.append("no STATUS with mode=RX within 1.0s after "
+                                "MODE_COMMAND rx")
+            else:
+                evidence.append(
+                    f"status mode={lib.status_mode_name(status)} "
+                    f"seq={status['sequence']}"
+                )
+        except Exception as error:
+            problems.append(f"MODE_COMMAND rx failed: {error}")
 
         # --- TX_COMMAND ACK ----------------------------------------------
         esp.clear()
@@ -60,7 +78,8 @@ def main() -> int:
             problems.append(f"no ACK for TX_COMMAND accepted=1 [esp: {esp.stats()}]")
         else:
             evidence.append(
-                f"ack accepted=1 hopping=0x{target[0]:08X} "
+                f"ack accepted_raw={ack.get('accepted_raw')} "
+                f"hopping=0x{target[0]:08X} "
                 f"serial=0x{target[1]:07X} button=0x{target[2]:X}"
             )
 
@@ -105,6 +124,11 @@ def main() -> int:
         print(f"{TAG} {NAME}: FAIL {error.__class__.__name__}: {error}")
         return 1
     finally:
+        # leave the radio in its boot default for the next test (T7 checks it)
+        try:
+            esp.set_mode(lib.MODE_IDLE, timeout=1.0)
+        except Exception:
+            pass
         esp.close()
 
 

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """T4: STM32 binary TX_COMMAND, received through the air by the ESP32.
 
+The ESP boots in IDLE (RMT RX off, no FRAME packets), so the test switches it
+to RX with MODE_COMMAND before expecting anything over the air.
+
 N loops (default 20, HIL_N to override).  Per loop:
   * TX_COMMAND (frames=3) over the STM32's USB CDC port; require an ACK
     with accepted=1
@@ -101,6 +104,13 @@ def main() -> int:
     except Exception as error:
         print(f"{TAG} {NAME}: FAIL cannot open serial port: {error}")
         return 1
+    try:
+        sink.set_mode(lib.MODE_RX)
+    except Exception as error:
+        print(f"{TAG} {NAME}: FAIL ESP did not enter RX mode: {error}")
+        source.close()
+        sink.close()
+        return 1
 
     passed = 0
     failed_notes = []
@@ -127,6 +137,11 @@ def main() -> int:
         print(f"{TAG} {NAME}: FAIL only {passed}/{N} passed | {reasons}")
         return 1
     finally:
+        # leave the radio in its boot default for the next test (T7 checks it)
+        try:
+            sink.set_mode(lib.MODE_IDLE, timeout=1.0)
+        except Exception:
+            pass
         source.close()
         sink.close()
 

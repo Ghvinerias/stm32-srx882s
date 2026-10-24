@@ -12,6 +12,7 @@ object PacketType {
     const val ACK = 5
     const val OTA_CMD = 6
     const val OTA_RESP = 7
+    const val MODE_COMMAND = 8
 }
 
 /**
@@ -25,6 +26,35 @@ object PacketFlags {
     const val DMA_OVERRUN = 1 shl 1
     const val CLOCK_FALLBACK = 1 shl 8
     const val CAPTURE_INIT_FAILED = 1 shl 9
+
+    /**
+     * Where the device's current [RadioMode] lives in `flags`: bits 2..3
+     * (mask `0x000C`), as chosen by the ESP32 firmware. Defined once here.
+     * The STM32 reference board never sets them and so always reads IDLE.
+     */
+    const val MODE_SHIFT = 2
+    const val MODE_MASK = 0b11 shl MODE_SHIFT
+}
+
+/** Device radio mode, as commanded by [ModeCommand] and reported in STATUS flags. */
+enum class RadioMode(val wire: Int) {
+    /** Default after boot: receiver off, no FRAMEs. */
+    IDLE(0),
+
+    /** Receiving. */
+    RX(1),
+
+    /** Transient: a TX burst is running; the device then returns to its previous mode. */
+    TX(2),
+    ;
+
+    companion object {
+        fun fromWire(value: Int): RadioMode? = entries.firstOrNull { it.wire == value }
+
+        /** Mode encoded in a STATUS/FRAME `flags` field; unknown values read as [IDLE]. */
+        fun fromFlags(flags: Int): RadioMode =
+            fromWire((flags and PacketFlags.MODE_MASK) ushr PacketFlags.MODE_SHIFT) ?: IDLE
+    }
 }
 
 /**
@@ -114,7 +144,24 @@ data class StatusPacket(
     val clockHz: Long,
     val totalEdges: Long,
     val droppedPackets: Int,
-) : Packet
+) : Packet {
+    /** The device's current radio mode, decoded from [flags]. */
+    val mode: RadioMode get() = RadioMode.fromFlags(flags)
+}
+
+/**
+ * Switch the device between [RadioMode.IDLE] and [RadioMode.RX] (host -> device), type 8.
+ *
+ * `IDLE` during a TX burst aborts the burst. The device answers with an ACK
+ * for type 8 (`accepted = 1`, or `0` for an unknown mode).
+ */
+data class ModeCommand(val mode: Int) : Packet {
+    init {
+        require(mode in 0..0xFF) { "mode must be a byte: $mode" }
+    }
+
+    constructor(mode: RadioMode) : this(mode.wire)
+}
 
 /**
  * A transmit request (host -> device), type 3.
@@ -125,7 +172,7 @@ data class StatusPacket(
  *   masks it to 28 bits, and [PacketCodec.encodeTxCommand] mirrors that, so
  *   values wider than 28 bits are truncated on the wire rather than rejected.
  * @property button button nibble, `0x0..0xF`.
- * @property frameCount number of frames to repeat, `1..10`.
+ * @property frameCount number of frames to repeat, `1..255`.
  */
 data class TxCommand(
     val hopping: Long,
@@ -159,7 +206,7 @@ data class TxCommand(
         const val BUTTON_MAX = 0xF
 
         const val MIN_FRAME_COUNT = 1
-        const val MAX_FRAME_COUNT = 10
+        const val MAX_FRAME_COUNT = 255
     }
 }
 
@@ -213,15 +260,36 @@ data class ScenarioCommand(val commandChar: Char) : Packet {
 /**
  * A command acknowledgement (device -> host), type 5.
  *
- * @property forType the command type being acknowledged: 3 (TX_COMMAND) or
- *   4 (SCENARIO_COMMAND).
- * @property accepted true when the command was executed, false when the
- *   firmware rejected or failed it.
+ * @property forType the command type being acknowledged: 3 (TX_COMMAND),
+ *   4 (SCENARIO_COMMAND) or 8 (MODE_COMMAND).
+ * @property result raw `accepted` byte: `1` executed/complete, `0`
+ *   rejected/busy/failed, `2` TX burst aborted. See [accepted] and [aborted].
  */
-data class AckPacket(val forType: Int, val accepted: Boolean) : Packet {
+data class AckPacket(val forType: Int, val result: Int) : Packet {
 
     init {
         require(forType in 0..0xFF) { "forType must be a byte: $forType" }
+        require(result in 0..0xFF) { "result must be a byte: $result" }
+    }
+
+    constructor(forType: Int, accepted: Boolean) :
+        this(forType, if (accepted) RESULT_OK else RESULT_REJECTED)
+
+    /** True only for a normal completion (`1`). */
+    val accepted: Boolean get() = result == RESULT_OK
+
+    /** A TX burst the device stopped early (`2`), e.g. after MODE IDLE. */
+    val aborted: Boolean get() = result == RESULT_ABORTED
+
+    companion object {
+        /** Rejected, busy or failed. */
+        const val RESULT_REJECTED = 0
+
+        /** Executed / burst completed. */
+        const val RESULT_OK = 1
+
+        /** TX burst aborted before completion. */
+        const val RESULT_ABORTED = 2
     }
 }
 

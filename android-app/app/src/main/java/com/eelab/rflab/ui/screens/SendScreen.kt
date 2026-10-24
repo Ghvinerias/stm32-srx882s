@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -86,6 +87,7 @@ fun SendScreen(
             batchSender = sendEngine::sendBatch,
             favoritesRepository = favoritesRepository,
             connectionStatus = RfLabSession.isConnected,
+            stopSender = sendEngine::stopTransmit,
         ),
     ),
 ) {
@@ -103,6 +105,7 @@ fun SendScreen(
         onMoveItemDown = viewModel::moveItemDown,
         onFrameCountChange = viewModel::setFrameCount,
         onSendAll = viewModel::sendAll,
+        onStop = viewModel::stopSending,
         onClearQueue = viewModel::clearQueue,
         onFavoriteNameChange = viewModel::onFavoriteNameChange,
         onSaveFavorite = { viewModel.saveFavorite(state.favoriteName) },
@@ -129,6 +132,7 @@ internal fun SendScreen(
     onMoveItemDown: (Long) -> Unit,
     onFrameCountChange: (Long, Int) -> Unit,
     onSendAll: () -> Unit,
+    onStop: () -> Unit,
     onClearQueue: () -> Unit,
     onFavoriteNameChange: (String) -> Unit,
     onSaveFavorite: () -> Unit,
@@ -200,7 +204,9 @@ internal fun SendScreen(
             itemCount = state.items.size,
             enabled = state.canSendAll,
             connected = state.isConnected,
+            sending = state.isSending,
             onSendAll = onSendAll,
+            onStop = onStop,
         )
     }
 }
@@ -280,7 +286,7 @@ private fun ManualEntryCard(
                 style = MaterialTheme.typography.titleMedium,
             )
             Text(
-                text = "Hex for hopping/serial/button; frames 1-10.",
+                text = "Hex for hopping/serial/button; frames 1-255 (~0.1 s each).",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -309,7 +315,7 @@ private fun ManualEntryCard(
                 OutlinedTextField(
                     value = entry.framesText,
                     onValueChange = onFramesChange,
-                    label = { Text("Frames (1-10)") },
+                    label = { Text("Frames (1-255)") },
                     singleLine = true,
                     isError = entry.framesError != null,
                     supportingText = errorSupportingText(entry.framesError),
@@ -525,7 +531,7 @@ private fun QueueItemCard(
                     text = item.frameCount.toString(),
                     style = MaterialTheme.typography.titleMedium,
                     textAlign = TextAlign.Center,
-                    modifier = Modifier.width(24.dp),
+                    modifier = Modifier.width(40.dp),
                 )
                 IconButton(
                     onClick = { onFrameCountChange(item.frameCount + 1) },
@@ -571,6 +577,7 @@ private fun StatusBadge(status: SendItemStatus) {
         SendItemStatus.ACKED_FAILED -> "Acked failed"
         SendItemStatus.TIMEOUT -> "Timeout"
         SendItemStatus.FAILED -> "Link failed"
+        SendItemStatus.ABORTED -> "Aborted"
     }
     val (container, content) = when (status) {
         SendItemStatus.PENDING ->
@@ -587,6 +594,7 @@ private fun StatusBadge(status: SendItemStatus) {
         SendItemStatus.ACKED_FAILED,
         SendItemStatus.TIMEOUT,
         SendItemStatus.FAILED,
+        SendItemStatus.ABORTED,
         -> MaterialTheme.colorScheme.errorContainer to
             MaterialTheme.colorScheme.onErrorContainer
     }
@@ -609,7 +617,9 @@ private fun SendAllBar(
     itemCount: Int,
     enabled: Boolean,
     connected: Boolean,
+    sending: Boolean,
     onSendAll: () -> Unit,
+    onStop: () -> Unit,
 ) {
     Surface(tonalElevation = 3.dp) {
         Column(
@@ -618,6 +628,18 @@ private fun SendAllBar(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            if (sending) {
+                Button(
+                    onClick = onStop,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                ) {
+                    Text("Stop (abort transmit)")
+                }
+            }
             Button(
                 onClick = onSendAll,
                 enabled = enabled,
@@ -641,7 +663,7 @@ private fun SendAllBar(
                 text = if (!connected) {
                     "Connect the board on the Connect tab to send."
                 } else {
-                    "One at a time: each item waits for its ACK or 2 s timeout."
+                    "One at a time: each item waits for its ACK (timeout grows with frame count)."
                 },
                 style = MaterialTheme.typography.labelSmall,
                 color = if (!connected) {

@@ -9,13 +9,19 @@ import com.eelab.rflab.decode.DecodedSignal
 import com.eelab.rflab.decode.Hcs301Decoder
 import com.eelab.rflab.decode.ScaleEstimator
 import com.eelab.rflab.protocol.FramePacket
+import com.eelab.rflab.protocol.RadioMode
+import com.eelab.rflab.protocol.StatusPacket
 import com.eelab.rflab.queue.SendQueueRepository
 import com.eelab.rflab.usb.TransportEvent
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.update
@@ -55,6 +61,10 @@ class ReceiveViewModel(
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val accumulator: ReceivedSignalAccumulator = ReceivedSignalAccumulator(),
     private val decodeErrorCount: StateFlow<Int> = MutableStateFlow(0),
+    deviceModes: Flow<RadioMode> = emptyFlow(),
+    frameArrivals: Flow<Unit> = emptyFlow(),
+    connected: Flow<Boolean> = flowOf(true),
+    private val modeSetter: suspend (RadioMode) -> Boolean = { true },
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ReceiveUiState())
@@ -74,6 +84,36 @@ class ReceiveViewModel(
                 _uiState.update { it.copy(queueSize = items.size) }
             }
         }
+        // The displayed mode always comes from the device's STATUS, never from
+        // what we asked for; a lost/absent link reads as Idle so nothing looks
+        // like it is receiving after a reconnect or a device reboot.
+        viewModelScope.launch {
+            deviceModes.collect { mode ->
+                _uiState.update {
+                    it.copy(
+                        mode = mode,
+                        framesWhileIdle = it.framesWhileIdle && mode == RadioMode.IDLE,
+                    )
+                }
+            }
+        }
+        // Frames are never hidden based on mode; just remember that they are
+        // arriving while the device says IDLE so the UI does not mislead.
+        viewModelScope.launch {
+            frameArrivals.collect {
+                _uiState.update {
+                    if (it.mode == RadioMode.IDLE && !it.framesWhileIdle) it.copy(framesWhileIdle = true) else it
+                }
+            }
+        }
+        viewModelScope.launch {
+            connected.collect { isUp ->
+                _uiState.update {
+                    if (isUp) it.copy(isConnected = true)
+                    else it.copy(isConnected = false, mode = RadioMode.IDLE, modeBusy = false, framesWhileIdle = false)
+                }
+            }
+        }
         viewModelScope.launch {
             decodeErrorCount.collect { count ->
                 _uiState.update { it.copy(decodeErrorCount = count) }
@@ -86,6 +126,29 @@ class ReceiveViewModel(
      * the ordered selection; selecting more than
      * [ReceivedSignalAccumulator.MAX_SELECTED_ROWS] rows is ignored.
      */
+    /** Start/Stop receiving: asks for RX when the device is idle, IDLE otherwise. */
+    fun toggleReceiving() {
+        val state = _uiState.value
+        if (!state.canToggleReceive) return
+        val target = if (state.mode == RadioMode.RX) RadioMode.IDLE else RadioMode.RX
+        _uiState.update { it.copy(modeBusy = true, modeMessage = null) }
+        viewModelScope.launch {
+            val ok = try {
+                modeSetter(target)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                false
+            }
+            _uiState.update {
+                it.copy(
+                    modeBusy = false,
+                    modeMessage = if (ok) null else "Device did not confirm the mode change",
+                )
+            }
+        }
+    }
+
     fun toggleSelection(rowId: Long) {
         if (accumulator.toggleSelection(rowId)) publishRows()
     }
@@ -152,9 +215,17 @@ class ReceiveViewModel(
             transportEvents: Flow<TransportEvent>,
             sendQueue: SendQueueRepository = SendQueueRepository.shared,
             clock: () -> Long = { System.currentTimeMillis() },
+            connected: Flow<Boolean> = flowOf(true),
+            modeSetter: suspend (RadioMode) -> Boolean = { true },
         ): ReceiveViewModel {
             val decodeErrors = MutableStateFlow(0)
             return ReceiveViewModel(
+                deviceModes = deviceModes(transportEvents),
+                frameArrivals = transportEvents
+                    .filter { it is TransportEvent.PacketReceived && it.packet is FramePacket }
+                    .map { },
+                connected = connected,
+                modeSetter = modeSetter,
                 signals = decodeSignals(transportEvents, decodeErrors),
                 sendQueue = sendQueue,
                 clock = clock,
@@ -166,9 +237,29 @@ class ReceiveViewModel(
         fun factory(
             transportEvents: Flow<TransportEvent>,
             sendQueue: SendQueueRepository = SendQueueRepository.shared,
+            connected: Flow<Boolean> = flowOf(true),
+            modeSetter: suspend (RadioMode) -> Boolean = { true },
         ): ViewModelProvider.Factory = viewModelFactory {
-            initializer { create(transportEvents, sendQueue) }
+            initializer {
+                create(
+                    transportEvents,
+                    sendQueue,
+                    connected = connected,
+                    modeSetter = modeSetter,
+                )
+            }
         }
+
+        /** Radio mode from each STATUS; a lost connection reads as [RadioMode.IDLE]. */
+        internal fun deviceModes(events: Flow<TransportEvent>): Flow<RadioMode> =
+            events.mapNotNull { event ->
+                when {
+                    event is TransportEvent.ConnectionLost -> RadioMode.IDLE
+                    event is TransportEvent.PacketReceived && event.packet is StatusPacket ->
+                        (event.packet as StatusPacket).mode
+                    else -> null
+                }
+            }
 
         /**
          * Feeds every frame's pulses through the running scale estimator

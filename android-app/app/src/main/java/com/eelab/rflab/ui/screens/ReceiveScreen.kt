@@ -38,6 +38,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.eelab.rflab.protocol.RadioMode
 import com.eelab.rflab.ui.receive.ReceiveUiState
 import com.eelab.rflab.ui.receive.ReceiveViewModel
 import com.eelab.rflab.ui.receive.ReceivedSignalRow
@@ -75,6 +76,7 @@ fun ReceiveScreen(
         onToggleSelection = viewModel::toggleSelection,
         onAddSelectedToQueue = { viewModel.addSelectedToQueue() },
         onClearReceived = viewModel::clearReceived,
+        onToggleReceiving = viewModel::toggleReceiving,
         modifier = modifier,
     )
 }
@@ -89,10 +91,12 @@ internal fun ReceiveScreen(
     onToggleSelection: (Long) -> Unit,
     onAddSelectedToQueue: () -> Unit,
     onClearReceived: () -> Unit,
+    onToggleReceiving: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxSize()) {
         ReceiveHeader(state = state, onClearReceived = onClearReceived)
+        RadioModeControl(state = state, onToggleReceiving = onToggleReceiving)
 
         if (state.rows.isEmpty()) {
             EmptyReceiveState(modifier = Modifier.weight(1f))
@@ -171,6 +175,51 @@ private fun ReceiveHeader(
                     contentDescription = "Clear received messages",
                 )
             }
+        }
+    }
+}
+
+/**
+ * Start/Stop receiving. The label and status text follow the mode the device
+ * reports in STATUS, so they stay honest after a reconnect or device reboot
+ * (both come back Idle; nothing starts until the user taps Start).
+ */
+@Composable
+private fun RadioModeControl(
+    state: ReceiveUiState,
+    onToggleReceiving: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = when {
+                    !state.isConnected -> "Not connected"
+                    state.mode == RadioMode.RX -> "Radio: receiving"
+                    state.mode == RadioMode.TX -> "Radio: transmitting"
+                    state.framesWhileIdle -> "Radio: idle (frames still arriving)"
+                    else -> "Radio: idle"
+                },
+                style = MaterialTheme.typography.titleSmall,
+            )
+            state.modeMessage?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+        }
+        Button(
+            onClick = onToggleReceiving,
+            enabled = state.canToggleReceive,
+        ) {
+            Text(if (state.mode == RadioMode.RX) "Stop receiving" else "Start receiving")
         }
     }
 }

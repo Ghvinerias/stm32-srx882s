@@ -16,12 +16,20 @@ What this module provides on top of that:
   * Device        -- background-reader wrapper around a CDC serial port that
                      splits the byte stream into binary packets (COBS+0x00)
                      and ASCII text lines (\\r\\n), interleaved
-  * waiting helpers (wait_ack / wait_packet / wait_line) with timeouts
+  * waiting helpers (wait_ack / wait_packet / wait_line / text_block) with
+                     timeouts; wait_ack can match the raw accepted byte
+                     (0 rejected/busy, 1 complete, 2 aborted by MODE IDLE)
+  * radio modes   -- MODE_COMMAND (type 8) senders on Device and BleSession
+                     (set_mode / set_mode_text), status_mode() to read the
+                     mode out of a STATUS packet (header flags bits 2..3),
+                     read_radio() for the `radio` text counters, and
+                     collect_status()/collect_packets() to gather packets for
+                     a window with their host timestamps
   * stm32_send_tx -- TX_COMMAND over the STM32 link, waits for the ACK
   * Capture       -- sigrok-cli (fx2lafw) recording one .sr file per step,
                      parsed in-process: edge timestamps, per-channel pulse
-                     lists, frame segmentation on idle gaps > 8 ms, frame
-                     decode via tools/decode_hcs301.py
+                     lists, frame segments with start times, frame decode via
+                     tools/decode_hcs301.py
   * codeword helpers -- HCS301 frame pulse generation (same constants as
                      firmware/src/lab_tx.c), codeword selection from env
                      or from tools/captures/r3*.ndjson
@@ -75,6 +83,7 @@ from rf_console import (  # noqa: E402
     PacketError,
     PacketStream,
     SerialPort,
+    build_mode_command,
     build_scenario_command,
     build_tx_command,
     cobs_decode,
@@ -102,6 +111,23 @@ TYPE_STATUS = 2
 TYPE_TX_COMMAND = 3
 TYPE_SCENARIO_COMMAND = 4
 TYPE_ACK = 5
+TYPE_MODE_COMMAND = 8
+
+# Radio mode: IDLE is the boot default (CC1101 idle, RMT RX off, no FRAMEs),
+# RX is listening, TX is transient during a burst.  STATUS header flags
+# bits 2..3 carry it; MODE_COMMAND selects IDLE/RX.
+MODE_FLAG_SHIFT = 2
+MODE_FLAG_MASK = 0x0003
+MODE_IDLE = 0
+MODE_RX = 1
+MODE_TX = 2
+MODE_NAMES = {MODE_IDLE: "idle", MODE_RX: "rx", MODE_TX: "tx"}
+MODE_BY_NAME = {name: value for value, name in MODE_NAMES.items()}
+
+# ACK accepted byte (was a boolean before the mode work).
+ACK_REJECTED = 0      # rejected / busy (e.g. a TX command during a burst)
+ACK_COMPLETE = 1      # completed (TX: burst ended normally)
+ACK_ABORTED = 2       # TX burst aborted by MODE IDLE
 
 PULSES_PER_FRAME = 77          # 11 preamble intervals + header + 65 data cells
 INTER_FRAME_GAP_US = 15500     # gap between frames inside one TX_COMMAND burst
@@ -133,6 +159,47 @@ def stm32_port() -> str:
 
 def esp_port() -> str:
     return os.environ.get("HIL_ESP_PORT", DEFAULT_ESP_PORT)
+
+
+# ---------------------------------------------------------------------------
+# radio mode helpers (pure: packet/line -> mode)
+# ---------------------------------------------------------------------------
+
+
+def status_mode(packet: dict) -> int | None:
+    """Mode carried by a STATUS packet: 0 IDLE, 1 RX, 2 TX (None if the
+    packet is not a STATUS).  Mirrors header flags bits 2..3."""
+    if packet.get("type") != "status":
+        return None
+    if "mode" in packet:
+        return int(packet["mode"])
+    return (int(packet.get("flags", 0)) >> MODE_FLAG_SHIFT) & MODE_FLAG_MASK
+
+
+def status_mode_name(packet: dict) -> str | None:
+    mode = status_mode(packet)
+    if mode is None:
+        return None
+    return MODE_NAMES.get(mode, f"unknown({mode})")
+
+
+def mode_from_line(line: str) -> int | None:
+    """Read the mode out of a text reply, tolerating both shapes the firmware
+    may use: `MODE idle` / `MODE rx` / `MODE tx`, or `... mode=idle` appended
+    to another line (the RADIO report)."""
+    text = line.strip().lower()
+    value = ""
+    if "mode=" in text:
+        value = text.split("mode=", 1)[1].split()[0].strip(",;|()")
+    elif text.startswith("mode"):
+        parts = text.split()
+        if len(parts) >= 2:
+            value = parts[1].strip(",;|()")
+    return MODE_BY_NAME.get(value)
+
+
+def mode_name(mode: int) -> str:
+    return MODE_NAMES.get(mode, f"unknown({mode})")
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +344,68 @@ class Device:
         self.write(command.encode("ascii") + b"\r\n")
         debug(f"{self.label}: sent text {command!r}")
 
+    def text_block(self, command: str, until=None, timeout: float = 2.0) -> list[str]:
+        """Send a text command and collect the lines it prints.
+
+        `until` is a line prefix (or tuple of them) that ends the collection;
+        the firmware answers some commands with several lines (RADIO then
+        RMT then BLE then CMD), so the caller names the last one it needs.
+        Without `until`, the first line that arrives is returned."""
+        prefixes = ()
+        if until is not None:
+            prefixes = (until,) if isinstance(until, str) else tuple(until)
+        with self.lock:
+            cursor = len(self.lines)
+        self.send_text(command)
+        collected: list[str] = []
+        deadline = time.monotonic() + timeout
+        while True:
+            with self.lock:
+                while cursor < len(self.lines):
+                    collected.append(self.lines[cursor])
+                    cursor += 1
+            if prefixes and any(line.startswith(prefixes) for line in collected):
+                return collected
+            if not prefixes and collected:
+                return collected
+            if time.monotonic() >= deadline:
+                return collected
+            time.sleep(0.01)
+
+    def send_mode_command(self, mode: int) -> None:
+        """Binary MODE_COMMAND (type 8): 0 = IDLE, 1 = RX."""
+        self.write(build_mode_command(mode))
+        debug(f"{self.label}: sent MODE_COMMAND mode={mode} ({mode_name(mode)})")
+
+    def set_mode(self, mode: int, wait_ack: bool = True, timeout: float = 2.0,
+                 want_raw: int | None = ACK_COMPLETE) -> dict | None:
+        """Select IDLE/RX and (by default) require ACK(for_type=8)
+        accepted=1.  Raises RuntimeError when the ACK does not arrive or its
+        accepted byte is not want_raw (None accepts any ACK)."""
+        self.send_mode_command(mode)
+        if not wait_ack:
+            return None
+        ack = self.wait_ack(TYPE_MODE_COMMAND, timeout, want_raw=want_raw)
+        if ack is None:
+            want = "any" if want_raw is None else str(want_raw)
+            raise RuntimeError(
+                f"{self.label}: no ACK for MODE_COMMAND {mode_name(mode)} with "
+                f"accepted={want} within {timeout:.1f}s [{self.stats()}]"
+            )
+        return ack
+
+    def set_mode_text(self, mode, timeout: float = 2.0) -> str | None:
+        """`mode idle` / `mode rx` on the text console; returns the MODE line
+        the firmware prints back, or None if it did not arrive in time."""
+        text = mode if isinstance(mode, str) else MODE_NAMES.get(mode)
+        if text not in MODE_BY_NAME:
+            raise ValueError(f"bad mode {mode!r}; want idle|rx")
+        lines = self.text_block(f"mode {text}", until="MODE", timeout=timeout)
+        for line in lines:
+            if line.startswith("MODE"):
+                return line
+        return None
+
     def send_tx_command(self, hopping: int, serial: int, button: int, frames: int = 3) -> None:
         self.write(build_tx_command(hopping, serial, button, frames))
         debug(
@@ -293,11 +422,11 @@ class Device:
 
     # -- waiting ------------------------------------------------------------
 
-    def wait_packet(self, predicate, timeout: float) -> dict | None:
+    def wait_packet(self, predicate, timeout: float, since: int = 0) -> dict | None:
         """Return the first packet matching predicate, or None on timeout.
-       _predicate_q is safe: polling a deque under a lock is cheap."""
+        `since` is the index to start scanning from (0 = whole buffer)."""
         deadline = time.monotonic() + timeout
-        cursor = 0
+        cursor = since
         while True:
             with self.lock:
                 while cursor < len(self.packets):
@@ -327,18 +456,38 @@ class Device:
             time.sleep(0.01)
 
     def wait_ack(self, for_type: int = TYPE_TX_COMMAND, timeout: float = 3.0,
-                 want_accepted: bool = True) -> dict | None:
-        def predicate(packet: dict) -> bool:
-            return (
-                packet.get("type") == "ack"
-                and packet.get("for_type") == for_type
-                and (packet.get("accepted") == want_accepted or not want_accepted)
-            )
+                 want_accepted: bool = True,
+                 want_raw: int | None = None,
+                 since: int = 0) -> dict | None:
+        """Return the first ACK for for_type, or None on timeout.
 
-        return self.wait_packet(predicate, timeout)
+        want_raw matches the raw accepted byte exactly (0 rejected/busy,
+        1 complete, 2 aborted by MODE IDLE) and takes precedence over
+        want_accepted, which keeps the historical boolean behaviour
+        (accepted == raw != 0)."""
+        def predicate(packet: dict) -> bool:
+            if packet.get("type") != "ack" or packet.get("for_type") != for_type:
+                return False
+            raw = packet.get("accepted_raw")
+            if raw is None:  # parser without the raw byte
+                raw = 1 if packet.get("accepted") else 0
+            if want_raw is not None:
+                return raw == want_raw
+            return (not want_accepted) or bool(packet.get("accepted"))
+
+        return self.wait_packet(predicate, timeout, since)
 
     def wait_status(self, timeout: float = 2.0) -> dict | None:
         return self.wait_packet(lambda p: p.get("type") == "status", timeout)
+
+    def wait_status_mode(self, mode: int, timeout: float = 2.0,
+                         since: int = 0) -> dict | None:
+        """First STATUS whose mode field equals mode (0 IDLE, 1 RX, 2 TX)."""
+        return self.wait_packet(
+            lambda p: p.get("type") == "status" and status_mode(p) == mode,
+            timeout,
+            since,
+        )
 
     def wait_frame(self, timeout: float = 2.0) -> dict | None:
         return self.wait_packet(lambda p: p.get("type") == "frame", timeout)
@@ -373,6 +522,52 @@ def stm32_send_tx(device: Device, codeword: tuple[int, int, int],
     if not ack["accepted"]:
         raise RuntimeError("ACK for TX_COMMAND reports accepted=0")
     return ack
+
+
+def collect_packets(device: Device, seconds: float, kind: str | None = None,
+                    since: int = 0) -> list[dict]:
+    """Gather packets arriving over the next `seconds`, each carrying the
+    reader's host_time (time.time()) stamp.
+
+    since is an index into device.packets; the default 0 means "everything
+    buffered", so call device.clear() first when only new traffic matters.
+    A STATUS/FRAME that arrived just before the call is kept that way."""
+    collected: list[dict] = []
+    cursor = since
+    end = time.monotonic() + seconds
+    while True:
+        with device.lock:
+            new = device.packets[cursor:]
+            cursor = len(device.packets)
+        for packet in new:
+            if kind is None or packet.get("type") == kind:
+                collected.append(packet)
+        if time.monotonic() >= end:
+            return collected
+        time.sleep(0.02)
+
+
+def collect_status(device: Device, seconds: float, since: int = 0) -> list[dict]:
+    """STATUS packets (host_time included) gathered over `seconds`."""
+    return collect_packets(device, seconds, "status", since)
+
+
+def read_radio(device: Device, timeout: float = 2.0) -> dict:
+    """Send `radio` and return its fields as a dict with lowercase keys.
+
+    The firmware answers with a RADIO line, then an RMT line carrying the
+    capture counters (rx_irq, rx_sym, tx_n, ...); both are folded into one
+    dict, and the raw lines are kept under "_lines".  Missing counters are
+    simply absent, so callers can stay tolerant of older firmware."""
+    lines = device.text_block("radio", until="RMT", timeout=timeout)
+    fields: dict = {"_lines": lines}
+    for line in lines:
+        for token in line.split():
+            if "=" not in token:
+                continue
+            key, _, value = token.partition("=")
+            fields.setdefault(key.lower(), value.strip().rstrip(","))
+    return fields
 
 
 # ---------------------------------------------------------------------------
@@ -668,6 +863,30 @@ class Capture:
             segments.append(current)
         return segments
 
+    def segments(self, channel: str) -> list[dict]:
+        """Frame segments with their start time: a list of
+        {"start_us": <time of the segment's first edge>, "pulses": [...]}
+        split on idle gaps > SEGMENT_GAP_US, exactly like pulses() but
+        keeping the timing so frame spacing can be measured."""
+        times = self.edge_times(channel)
+        segments: list[dict] = []
+        start = None
+        pulses: list[int] = []
+        for earlier, later in zip(times, times[1:]):
+            delta = later - earlier
+            if delta > SEGMENT_GAP_US:
+                if pulses:
+                    segments.append({"start_us": start, "pulses": pulses})
+                start = None
+                pulses = []
+                continue
+            if start is None:
+                start = earlier
+            pulses.append(int(delta))
+        if pulses:
+            segments.append({"start_us": start, "pulses": pulses})
+        return segments
+
     def decoded_frames(self, channel: str) -> list[dict]:
         frames = []
         for segment in self.pulses(channel):
@@ -891,6 +1110,47 @@ class BleSession:
     async def send_packet(self, raw: bytes) -> None:
         await self.write(cobs_encode(raw) + b"\x00")
 
+    async def send_mode_command(self, mode: int) -> None:
+        """Binary MODE_COMMAND (type 8): 0 = IDLE, 1 = RX."""
+        await self.write(build_mode_command(mode))
+
+    async def set_mode(self, mode: int, wait_ack: bool = True,
+                       timeout: float = 2.0,
+                       want_raw: int | None = ACK_COMPLETE) -> dict | None:
+        await self.send_mode_command(mode)
+        if not wait_ack:
+            return None
+        ack = await self.wait_ack(TYPE_MODE_COMMAND, timeout, want_raw=want_raw)
+        if ack is None:
+            want = "any" if want_raw is None else str(want_raw)
+            raise RuntimeError(
+                f"BLE: no ACK for MODE_COMMAND {mode_name(mode)} with "
+                f"accepted={want} within {timeout:.1f}s [{self.stats()}]"
+            )
+        return ack
+
+    async def next_line(self, prefixes, timeout: float = 2.0) -> str | None:
+        prefixes = (prefixes,) if isinstance(prefixes, str) else tuple(prefixes)
+        cursor = len(self.lines)
+        deadline = time.monotonic() + timeout
+        while True:
+            while cursor < len(self.lines):
+                line = self.lines[cursor]
+                cursor += 1
+                if line.startswith(prefixes):
+                    return line
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(0.01)
+
+    async def set_mode_text(self, mode, timeout: float = 2.0) -> str | None:
+        """`mode idle` / `mode rx` over BLE; returns the MODE line, if any."""
+        text = mode if isinstance(mode, str) else MODE_NAMES.get(mode)
+        if text not in MODE_BY_NAME:
+            raise ValueError(f"bad mode {mode!r}; want idle|rx")
+        await self.send_text(f"mode {text}")
+        return await self.next_line("MODE", timeout)
+
     async def next_packet(self, predicate, timeout: float) -> dict | None:
         deadline = time.monotonic() + timeout
         while True:
@@ -907,10 +1167,27 @@ class BleSession:
     async def wait_status(self, timeout: float = 2.0) -> dict | None:
         return await self.next_packet(lambda p: p.get("type") == "status", timeout)
 
-    async def wait_ack(self, for_type: int = TYPE_TX_COMMAND, timeout: float = 5.0) -> dict | None:
+    async def wait_status_mode(self, mode: int, timeout: float = 2.0) -> dict | None:
         return await self.next_packet(
-            lambda p: p.get("type") == "ack" and p.get("for_type") == for_type, timeout
+            lambda p: p.get("type") == "status" and status_mode(p) == mode,
+            timeout,
         )
+
+    async def wait_ack(self, for_type: int = TYPE_TX_COMMAND, timeout: float = 5.0,
+                       want_raw: int | None = None) -> dict | None:
+        """ACK for for_type; want_raw matches the raw accepted byte
+        (0 rejected/busy, 1 complete, 2 aborted by MODE IDLE)."""
+        def predicate(packet: dict) -> bool:
+            if packet.get("type") != "ack" or packet.get("for_type") != for_type:
+                return False
+            if want_raw is None:
+                return True
+            raw = packet.get("accepted_raw")
+            if raw is None:
+                raw = 1 if packet.get("accepted") else 0
+            return raw == want_raw
+
+        return await self.next_packet(predicate, timeout)
 
     def stats(self) -> str:
         return (
@@ -1007,6 +1284,43 @@ def selftest() -> int:
     decoded, _scale = decode_segment(corrupted)
     if decoded is not None:
         fail("corrupted pulse list still decoded (robustness)")
+
+    # 1c) radio-mode helpers: MODE_COMMAND wire bytes, STATUS mode bits,
+    #     ACK raw accepted byte, text-mode parsing
+    expected = bytes([VERSION, TYPE_MODE_COMMAND, MODE_RX])
+    crc = crc16_ccitt(expected)
+    wire = build_mode_command(MODE_RX)
+    if cobs_decode(wire[:-1]) != expected + bytes([crc & 0xFF, crc >> 8]):
+        fail(f"build_mode_command(MODE_RX) wire bytes wrong: {wire.hex()}")
+    if not wire.endswith(b"\x00"):
+        fail("build_mode_command is not 0x00-terminated")
+
+    ack_raw = bytes([VERSION, TYPE_ACK, TYPE_MODE_COMMAND, ACK_ABORTED])
+    ack_crc = crc16_ccitt(ack_raw)
+    ack = parse_packet(cobs_encode(ack_raw + bytes([ack_crc & 0xFF, ack_crc >> 8])))
+    if ack.get("accepted_raw") != ACK_ABORTED or ack.get("accepted") is not True:
+        fail(f"ACK accepted byte not exposed as accepted_raw: {ack}")
+
+    if status_mode({"type": "status", "flags": MODE_TX << MODE_FLAG_SHIFT}) != MODE_TX:
+        fail("status_mode does not read flags bits 2..3")
+    if status_mode({"type": "status", "flags": MODE_IDLE}) != MODE_IDLE:
+        fail("status_mode does not report IDLE for flags 0")
+    if status_mode({"type": "frame", "flags": 0}) is not None:
+        fail("status_mode treated a FRAME as a STATUS")
+    for line, want in (("MODE idle", MODE_IDLE), ("MODE rx", MODE_RX),
+                       ("MODE tx", MODE_TX),
+                       ("RADIO CC1101 partnum=0x00 state=IDLE mode=idle", MODE_IDLE)):
+        if mode_from_line(line) != want:
+            fail(f"mode_from_line({line!r}) != {want}")
+
+    probe = Device("selftest")
+    probe.packets = [{"type": "ack", "for_type": TYPE_TX_COMMAND,
+                      "accepted": False, "accepted_raw": ACK_REJECTED,
+                      "host_time": 0.0}]
+    if probe.wait_ack(TYPE_TX_COMMAND, 0.01, want_raw=ACK_REJECTED) is None:
+        fail("wait_ack(want_raw=0) did not match a busy ACK")
+    if probe.wait_ack(TYPE_TX_COMMAND, 0.01, want_raw=ACK_COMPLETE) is not None:
+        fail("wait_ack(want_raw=1) matched a busy ACK")
 
     # 2) real capture from tools/captures
     capture_dir = TOOLS_DIR / "captures"
