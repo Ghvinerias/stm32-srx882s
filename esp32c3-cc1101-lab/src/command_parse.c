@@ -487,7 +487,8 @@ static void handle_text_line(uint8_t link, char *line) {
     if (strcmp(first, "gpio") == 0 || strcmp(first, "rssi") == 0 ||
         strcmp(first, "rxedges") == 0 || strcmp(first, "reinit") == 0 ||
         strcmp(first, "spitest") == 0 ||
-        strcmp(first, "sweep") == 0) {
+        strcmp(first, "sweep") == 0 ||
+        strcmp(first, "rxraw") == 0) {
         execute_diag_text(link, first);
         return;
     }

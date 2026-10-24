@@ -22,6 +22,7 @@
 static uint32_t last_status_ms;
 static uint32_t boot_ms;
 static uint32_t last_arm_try_ms;
+static bool last_arm_failed;
 #define RX_REARM_RETRY_MS 500U
 static bool usb_was_up;
 static bool ble_was_up;
@@ -101,13 +102,27 @@ static void radio_report_cb(char *out, size_t capacity) {
     radio_rmt_stats_t rmt = radio_rmt_stats();
     if (used < capacity) {
         used += (size_t)snprintf(out + used, capacity - used,
-                                 "RMT rx_irq=%u rx_sym=%u tx_n=%u tx_fail=%u "
-                                 "tx_us=%u/%u\r\n",
+                                 "RMT rx_irq=%u rx_sym=%u hcs=%u raw=%d tx_n=%u "
+                                 "tx_fail=%u tx_us=%u/%u\r\n",
                                  (unsigned)rmt.rx_irq, (unsigned)rmt.rx_symbols,
+                                 (unsigned)radio_rmt_hcs_reduced(),
+                                 radio_rmt_raw_mode() ? 1 : 0,
                                  (unsigned)rmt.tx_count,
                                  (unsigned)rmt.tx_failures,
                                  (unsigned)rmt.last_tx_us,
                                  (unsigned)rmt.expected_tx_us);
+    }
+    if (used > capacity) {
+        used = capacity;
+    }
+    ble_serial_stats_t ble = ble_serial_stats();
+    if (used < capacity) {
+        used += (size_t)snprintf(out + used, capacity - used,
+                                 "BLE conn=%u sub=%u mtu=%u handle=%u events c/d/s=%u/%u/%u notifies=%u\r\n",
+                                 ble.connected, ble.subscribed, ble.mtu,
+                                 ble.conn_handle, (unsigned)ble.connect_events,
+                                 (unsigned)ble.disconnect_events,
+                                 (unsigned)ble.subscribe_events, (unsigned)ble.notifies);
     }
     if (used > capacity) {
         used = capacity;
@@ -164,6 +179,10 @@ static void diag_cb(const char *name, char *out, size_t capacity) {
                  "rmt_rx_sym=%u\r\n",
                  (unsigned)edges, (unsigned)(high / 10U), (unsigned)(high % 10U),
                  (unsigned)rmt.rx_irq, (unsigned)rmt.rx_symbols);
+    } else if (strcmp(name, "rxraw") == 0) {
+        radio_rmt_set_raw_mode(!radio_rmt_raw_mode());
+        snprintf(out, capacity, "RXRAW raw=%d (1 = plain both-edge intervals)\r\n",
+                 radio_rmt_raw_mode() ? 1 : 0);
     } else if (strcmp(name, "spitest") == 0) {
         cc1101_spi_selftest(out, capacity);
     } else if (strcmp(name, "sweep") == 0) {
@@ -360,10 +379,12 @@ void firmware_app_loop(void) {
 
     // Re-arm retries are rate-limited so a persistent failure can never
     // starve the loop (or flood any log) -- ACK latency matters more.
+    // Re-arm at once after a normal reception (the next frame of a remote's
+    // burst can follow ~10 ms later); back off only after a failed arm.
     if (!radio_rmt_rx_armed() && !ota_session_rx_suspended() &&
-        (uint32_t)(now - last_arm_try_ms) >= RX_REARM_RETRY_MS) {
+        (!last_arm_failed || (uint32_t)(now - last_arm_try_ms) >= RX_REARM_RETRY_MS)) {
         last_arm_try_ms = now;
-        (void)radio_rmt_rx_arm();
+        last_arm_failed = !radio_rmt_rx_arm();
     }
 
     // ---- STATUS heartbeat ----

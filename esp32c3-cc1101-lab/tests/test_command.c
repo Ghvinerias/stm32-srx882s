@@ -60,37 +60,16 @@ static void build_scenario_command(uint8_t *raw, uint8_t command) {
     raw[4] = (uint8_t)(crc >> 8U);
 }
 
-// Decode the 66 code-word bits out of the first frame of an emitted burst.
+// Decode the 66 code-word bits out of the first frame of an emitted burst:
+// reduce the PWM waveform to the STM32's falling-edge periods, then decode.
 static int decode_bits(const uint16_t *pulses, size_t count,
                        uint8_t bits[LAB_CODEWORD_BITS]) {
-    if (count < LAB_FRAME_PULSES) {
+    uint16_t periods[LAB_FRAME_PERIODS];
+    if (lab_tx_frame_periods(pulses, count, periods, LAB_FRAME_PERIODS) !=
+        LAB_FRAME_PERIODS) {
         return 0;
     }
-    for (size_t i = 0; i < LAB_PREAMBLE_INTERVALS; ++i) {
-        if (pulses[i] != LAB_PREAMBLE_EDGE_US) {
-            return 0;
-        }
-    }
-    if (pulses[11] == LAB_HEADER_BIT_ONE_US) {
-        bits[0] = 1U;
-    } else if (pulses[11] == LAB_HEADER_BIT_ZERO_US) {
-        bits[0] = 0U;
-    } else {
-        return 0;
-    }
-    for (size_t i = 0; i < 65U; ++i) {
-        uint16_t d = pulses[12U + i];
-        if (d == LAB_DATA_MID_US) {
-            bits[i + 1U] = bits[i];
-        } else if (d == LAB_DATA_SHORT_US && bits[i] == 0U) {
-            bits[i + 1U] = 1U;
-        } else if (d == LAB_DATA_LONG_US && bits[i] == 1U) {
-            bits[i + 1U] = 0U;
-        } else {
-            return 0;
-        }
-    }
-    return 1;
+    return lab_tx_bits_from_periods(periods, LAB_FRAME_PERIODS, bits);
 }
 
 static int decode_ack(const rec_t *rec, uint8_t *type, uint8_t *accepted) {
@@ -173,8 +152,8 @@ int main(void) {
         feed_binary(PROTO_LINK_USB, raw, 14U);
 
         expect("binary TX_COMMAND emits one burst", tx.calls == 1);
-        expect("five frames means 5*77 + 4 gaps",
-               tx.count == 5U * LAB_FRAME_PULSES + 4U);
+        expect("five frames means 5 x 156 PWM pulses",
+               tx.count == 5U * LAB_FRAME_PULSES);
 
         uint8_t bits[LAB_CODEWORD_BITS];
         uint8_t expected[LAB_CODEWORD_BITS];
@@ -219,8 +198,7 @@ int main(void) {
         feed_binary(PROTO_LINK_USB, raw, 5U);
         expect("scenario 's' emits three frames", tx.calls == 1 &&
                                                       tx.count ==
-                                                          3U * LAB_FRAME_PULSES +
-                                                              2U);
+                                                          3U * LAB_FRAME_PULSES);
         uint8_t type = 0, accepted = 0;
         expect("scenario is ACKed with its own packet type",
                decode_ack(&links.usb, &type, &accepted) &&

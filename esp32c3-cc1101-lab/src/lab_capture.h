@@ -88,6 +88,18 @@ int lab_capture_finalize(const lab_capture_interval_t *intervals,
 size_t lab_capture_filter_glitches(lab_capture_interval_t *intervals,
                                    size_t count, uint32_t min_us);
 
+// Converts a both-edge RMT capture of an HCS301-shaped frame into the STM32
+// reference representation: 77 periods between consecutive same-polarity
+// edges (11 preamble ~790 us, 1 header ~4.2-4.8 ms, 65 data cells of
+// ~0.8/1.2/1.5 ms), which is what tools/decode_hcs301.py and the Android
+// decoder consume.  Returns 1 and rewrites the frame when it matches (the
+// receiver loses the first preamble edge while its AGC settles and the last
+// cell is cut by the following idle gap, so the preamble is re-synthesised
+// and the 65th cell is estimated as "same level as the previous bit");
+// returns 0 and leaves the frame untouched otherwise (non-HCS301 signals,
+// split/partial frames).
+int lab_capture_reduce_hcs301(capture_frame_t *frame);
+
 #ifdef __cplusplus
 }
 #endif

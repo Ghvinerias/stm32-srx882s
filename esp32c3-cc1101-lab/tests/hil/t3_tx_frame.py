@@ -80,14 +80,20 @@ def run_iteration(index: int, target: tuple[int, int, int], source: lib.Device,
                 detail.append(f"wrong fields: {mismatched[0]}")
             return False, "; ".join(detail)
 
-        # The STM32 reference receiver is a secondary witness only (its input
-        # capture reports 38 pulses/frame, so it often cannot be decoded by
-        # the same decoder): report it, do not fail on it.
-        if stm32_frame is None:
-            stm32_note = "stm32: no FRAME"
-        else:
-            why = fields_match(stm32_frame, target)
-            stm32_note = f"stm32 seq{stm32_frame['sequence']} " + ("ok" if not why else f"({why})")
+        # The STM32 reference receiver is the oracle: its SRX882 + capture path
+        # decodes the real remote 154/154, so it must report full 77-period
+        # FRAMEs carrying the transmitted hopping/serial/button.
+        with stm32.lock:
+            stm32_frames = [p for p in stm32.packets if p.get("type") == "frame"]
+        matched = [f for f in stm32_frames
+                   if len(f.get("pulses_us") or []) == 77 and fields_match(f, target) is None]
+        if not matched:
+            counts = sorted({len(f.get("pulses_us") or []) for f in stm32_frames})
+            why = [fields_match(f, target) for f in stm32_frames[:2]]
+            return False, (f"STM32 decoded no matching 77-pulse FRAME "
+                           f"(frames={len(stm32_frames)} pulse_counts={counts} {why}) "
+                           f"[air frames ok: {matching}]")
+        stm32_note = f"stm32 frames={len(stm32_frames)} matching77={len(matched)}"
 
         lib.iter_report(
             f"it={index}",

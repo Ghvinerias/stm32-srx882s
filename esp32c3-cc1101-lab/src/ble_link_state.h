@@ -12,6 +12,7 @@ typedef struct {
     volatile uint8_t connected;
     volatile uint8_t subscribed;
     volatile uint16_t mtu;
+    volatile uint16_t conn_handle; // connection the flags above describe
 } ble_link_state_t;
 
 #ifdef __cplusplus
@@ -19,10 +20,15 @@ extern "C" {
 #endif
 
 void ble_link_init(ble_link_state_t *state);
-void ble_link_on_connect(ble_link_state_t *state);
-void ble_link_on_disconnect(ble_link_state_t *state);
-void ble_link_on_subscribe(ble_link_state_t *state, uint16_t sub_value);
-void ble_link_on_mtu(ble_link_state_t *state, uint16_t mtu);
+// A stale connection (e.g. a client that vanished without disconnecting) can
+// report its disconnect after a new client has connected and subscribed, so
+// every event carries the connection handle and only the *current* connection
+// may change the state.
+void ble_link_on_connect(ble_link_state_t *state, uint16_t handle);
+void ble_link_on_disconnect(ble_link_state_t *state, uint16_t handle);
+void ble_link_on_subscribe(ble_link_state_t *state, uint16_t handle,
+                           uint16_t sub_value);
+void ble_link_on_mtu(ble_link_state_t *state, uint16_t handle, uint16_t mtu);
 int ble_link_can_notify(const ble_link_state_t *state);
 // Notification payload size: min(mtu - 3, max_payload), never below 20.
 uint16_t ble_link_chunk(const ble_link_state_t *state, uint16_t max_payload);

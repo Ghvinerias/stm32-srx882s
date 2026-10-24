@@ -425,6 +425,22 @@ def decode_segment(pulses: list[int]) -> tuple[dict | None, float]:
     return None, (scale or 1.0)
 
 
+def decode_air_segment(deltas: list[int]) -> tuple[dict | None, float]:
+    """Decode an over-the-air capture: edge-to-edge deltas of real HCS301 PWM
+    (as seen on the SRX882 pin).  The STM32 reference reports falling-edge to
+    falling-edge periods, so reduce to those first (trying both parities in case
+    the first edge was missed); fall back to the already-reduced form."""
+    for parity in (1, 0):
+        periods = [deltas[i] + deltas[i + 1] for i in range(parity, len(deltas) - 1, 2)]
+        for start in range(0, 3):
+            candidate = periods[start:start + 77]
+            if len(candidate) == 77:
+                decoded, scale = decode_segment(candidate)
+                if decoded:
+                    return decoded, scale
+    return decode_segment(deltas)
+
+
 def _single_frame_scale(pulses: list[int]) -> float | None:
     values = [p for p in pulses[PREAMBLE_EDGES + 1:]]
     if len(values) < 8:
@@ -655,7 +671,7 @@ class Capture:
     def decoded_frames(self, channel: str) -> list[dict]:
         frames = []
         for segment in self.pulses(channel):
-            decoded, scale = decode_segment(segment)
+            decoded, scale = decode_air_segment(segment)
             if decoded:
                 decoded["scale"] = scale
                 decoded["pulse_count"] = len(segment)

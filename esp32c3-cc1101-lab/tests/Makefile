@@ -15,7 +15,7 @@ LIB := $(SRC)/proto_transport.c $(SRC)/lab_capture.c $(SRC)/lab_tx.c \
        $(SRC)/lab_rx.c $(SRC)/command_parse.c $(SRC)/ota_session.c
 
 BINS := test_transport test_codeword test_capture test_command test_rxsim \
-        test_app_packets test_usb_policy test_ble_link test_cc1101_regs test_ota
+        test_app_packets test_usb_policy test_ble_link test_cc1101_regs test_hcs_reduce test_ota
 
 .PHONY: all test clean
 
@@ -43,6 +43,9 @@ test_usb_policy: test_usb_policy.c $(SRC)/usb_tx_policy.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 test_ble_link: test_ble_link.c $(SRC)/ble_link_state.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+test_hcs_reduce: test_hcs_reduce.c $(SRC)/lab_capture.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 test_cc1101_regs: test_cc1101_regs.c

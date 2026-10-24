@@ -202,3 +202,117 @@ size_t lab_capture_filter_glitches(lab_capture_interval_t *intervals,
     }
     return out;
 }
+
+#define HCS_PREAMBLE_PERIODS 11U
+#define HCS_DATA_CELLS 65U
+#define HCS_FRAME_PERIODS (HCS_PREAMBLE_PERIODS + 1U + HCS_DATA_CELLS)
+
+static uint32_t median_u16(const uint16_t *values, size_t count) {
+    uint16_t sorted[HCS_DATA_CELLS];
+    if (count > HCS_DATA_CELLS) {
+        count = HCS_DATA_CELLS;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        size_t j = i;
+        while (j > 0U && sorted[j - 1U] > values[i]) {
+            sorted[j] = sorted[j - 1U];
+            --j;
+        }
+        sorted[j] = values[i];
+    }
+    return count ? sorted[count / 2U] : 0U;
+}
+
+int lab_capture_reduce_hcs301(capture_frame_t *frame) {
+    if (!frame || frame->pulse_count < 2U * (8U + 1U + 64U)) {
+        return 0;
+    }
+    for (size_t phase = 0; phase < 2U; ++phase) {
+        size_t pairs = ((size_t)frame->pulse_count - phase) / 2U;
+        for (size_t h = 8U; h + 64U < pairs; ++h) {
+            uint32_t header = (uint32_t)frame->pulses[phase + 2U * h] +
+                              frame->pulses[phase + 2U * h + 1U];
+            if (header < 3300U || header > 6500U) {
+                continue;
+            }
+            int preamble_ok = 1;
+            for (size_t k = h - 8U; k < h; ++k) {
+                uint32_t period = (uint32_t)frame->pulses[phase + 2U * k] +
+                                  frame->pulses[phase + 2U * k + 1U];
+                if (period < 600U || period > 1000U) {
+                    preamble_ok = 0;
+                    break;
+                }
+            }
+            if (!preamble_ok) {
+                continue;
+            }
+            uint16_t cells[HCS_DATA_CELLS];
+            size_t have = pairs - h - 1U;
+            if (have > HCS_DATA_CELLS) {
+                have = HCS_DATA_CELLS;
+            }
+            size_t valid = 0;
+            for (; valid < have; ++valid) {
+                size_t index = phase + 2U * (h + 1U + valid);
+                uint32_t period = (uint32_t)frame->pulses[index] +
+                                  frame->pulses[index + 1U];
+                if (period < 500U || period > 1900U) {
+                    break;
+                }
+                cells[valid] = (uint16_t)period;
+            }
+            // The very last pair of a capture ends in the idle gap that closed
+            // the reception, so its period is meaningless: never use it.
+            if (valid > 0U && h + 1U + valid == pairs) {
+                --valid;
+            }
+            // The 65th cell is normally unusable (cut by the idle gap), so
+            // accept 64 valid cells; fewer means a split frame.
+            if (valid < 64U) {
+                continue;
+            }
+            uint32_t mid = median_u16(cells, valid);
+            if (mid < 1000U || mid > 1350U) {
+                continue; // data cells are not the MID class: not HCS301
+            }
+            // Real data has bit transitions (short/long cells); a run of
+            // identical cells is receiver noise, not a code word.
+            size_t transitions = 0;
+            for (size_t k = 0; k < valid; ++k) {
+                uint32_t diff = cells[k] > mid ? cells[k] - mid : mid - cells[k];
+                if (diff * 8U > mid) {
+                    ++transitions;
+                }
+            }
+            if (transitions < 8U) {
+                continue;
+            }
+            if (valid == 64U) {
+                cells[64] = (uint16_t)mid; // estimated: repeat bit = vlow bit
+            }
+            uint32_t preamble_sum = 0;
+            for (size_t k = h - 8U; k < h; ++k) {
+                preamble_sum += (uint32_t)frame->pulses[phase + 2U * k] +
+                                frame->pulses[phase + 2U * k + 1U];
+            }
+            uint16_t preamble = (uint16_t)(preamble_sum / 8U);
+            uint16_t out[HCS_FRAME_PERIODS];
+            size_t n = 0;
+            for (size_t k = 0; k < HCS_PREAMBLE_PERIODS; ++k) {
+                out[n++] = preamble;
+            }
+            out[n++] = (uint16_t)header;
+            for (size_t k = 0; k < HCS_DATA_CELLS; ++k) {
+                out[n++] = cells[k];
+            }
+            for (size_t k = 0; k < HCS_FRAME_PERIODS; ++k) {
+                frame->pulses[k] = out[k];
+            }
+            frame->pulse_count = (uint16_t)HCS_FRAME_PERIODS;
+            frame->initial_level = 1U; // same convention as the STM32 capture
+            return 1;
+        }
+    }
+    return 0;
+}

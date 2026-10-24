@@ -26,3 +26,16 @@ size_t ble_serial_read(uint8_t *data, size_t max_length);
 bool ble_serial_write(const uint8_t *data, size_t length);
 
 void ble_serial_reset_link(void);
+
+// Diagnostics for the `radio` line.
+typedef struct {
+    uint8_t connected;
+    uint8_t subscribed;
+    uint16_t mtu;
+    uint16_t conn_handle;
+    uint32_t subscribe_events;
+    uint32_t connect_events;
+    uint32_t disconnect_events;
+    uint32_t notifies;
+} ble_serial_stats_t;
+ble_serial_stats_t ble_serial_stats(void);

@@ -16,19 +16,20 @@ static BLECharacteristic *ble_tx;
 static StreamBufferHandle_t ble_rx_stream;
 
 static ble_link_state_t link_state;
+static volatile uint32_t stat_subscribe, stat_connect, stat_disconnect, stat_notify;
 
 class LabServerCallbacks : public BLEServerCallbacks {
   public:
     void onConnect(BLEServer *server, ble_gap_conn_desc *desc) override {
         (void)server;
-        (void)desc;
-        ble_link_on_connect(&link_state);
+        stat_connect = stat_connect + 1U;
+        ble_link_on_connect(&link_state, desc ? desc->conn_handle : 0U);
     }
 
     void onDisconnect(BLEServer *server, ble_gap_conn_desc *desc) override {
         (void)server;
-        (void)desc;
-        ble_link_on_disconnect(&link_state);
+        stat_disconnect = stat_disconnect + 1U;
+        ble_link_on_disconnect(&link_state, desc ? desc->conn_handle : 0U);
         // The HCS301 lab wants a connection available again right away.
         BLEDevice::startAdvertising();
     }
@@ -36,8 +37,7 @@ class LabServerCallbacks : public BLEServerCallbacks {
     void onMtuChanged(BLEServer *server, ble_gap_conn_desc *desc,
                       uint16_t mtu) override {
         (void)server;
-        (void)desc;
-        ble_link_on_mtu(&link_state, mtu);
+        ble_link_on_mtu(&link_state, desc ? desc->conn_handle : 0U, mtu);
     }
 };
 
@@ -63,8 +63,8 @@ class LabTxCallbacks : public BLECharacteristicCallbacks {
     void onSubscribe(BLECharacteristic *characteristic,
                      ble_gap_conn_desc *desc, uint16_t subValue) override {
         (void)characteristic;
-        (void)desc;
-        ble_link_on_subscribe(&link_state, subValue);
+        stat_subscribe = stat_subscribe + 1U;
+        ble_link_on_subscribe(&link_state, desc ? desc->conn_handle : 0U, subValue);
     }
 };
 
@@ -146,6 +146,7 @@ bool ble_serial_write(const uint8_t *data, size_t length) {
         // hole in the byte stream, which the COBS decoder resynchronises on at
         // the next 0x00 delimiter.
         ble_tx->notify();
+        stat_notify = stat_notify + 1U;
         offset += piece;
         if (offset < length) {
             // Pace multi-chunk packets: back-to-back notify() calls can
@@ -157,3 +158,16 @@ bool ble_serial_write(const uint8_t *data, size_t length) {
 }
 
 void ble_serial_reset_link(void) { link_state.subscribed = 0U; }
+
+ble_serial_stats_t ble_serial_stats(void) {
+    ble_serial_stats_t s;
+    s.connected = link_state.connected;
+    s.subscribed = link_state.subscribed;
+    s.mtu = link_state.mtu;
+    s.conn_handle = link_state.conn_handle;
+    s.subscribe_events = stat_subscribe;
+    s.connect_events = stat_connect;
+    s.disconnect_events = stat_disconnect;
+    s.notifies = stat_notify;
+    return s;
+}

@@ -365,3 +365,14 @@ bluetoothctl --timeout 8 scan on | grep -i keeloq
   restart bluetooth` before BLE tests.
 * ESP text diagnostics: `radio regs gpio rssi rxedges reinit spitest sweep
   txtest [pad|gpio] carrier` (replies are CRLF text mixed into the binary stream).
+
+## 9. Waveform facts (measured from a real HCS301 remote, 2026-10-24)
+
+On-air: PWM, carrier ON = high, TE ~ 395 us: preamble 12 x (1 TE H, 1 TE L),
+10 TE header low, then 66 bits (bit 0 = 2 TE H + 1 TE L, bit 1 = 1 TE H + 2 TE L),
+then idle low.  The STM32 capture reports *falling-edge to falling-edge* periods
+(77 per frame: 11 preamble ~790, header 4345/4745, data cells ~825/1185/1545), the
+CC1101+RMT receiver reports every edge; firmware reduces matching frames to the
+STM32 form (`lab_capture_reduce_hcs301`), and the TX path expands code words
+to real PWM (`lab_tx_pwm_frame`).  Verified: STM32 decodes ESP-TX frames as full
+77-period frames, class medians within 1 % of the real remote.

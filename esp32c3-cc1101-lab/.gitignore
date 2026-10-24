@@ -16,3 +16,4 @@ tests/test_ble_link
 dist/
 flashsite/fw/
 tests/test_cc1101_regs
+tests/test_hcs_reduce

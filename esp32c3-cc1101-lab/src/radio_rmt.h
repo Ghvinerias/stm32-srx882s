@@ -64,6 +64,13 @@ uint32_t radio_rmt_count_edges(uint32_t ms, uint32_t *high_permille);
 // (then recreated).  Returns 1 if the RMT TX channel was rebuilt OK.
 int radio_rmt_gpio_bitbang(const uint16_t *pulses, size_t pulse_count);
 
+// HCS301 frames are normally rewritten into the STM32 reference representation
+// (77 same-polarity periods) before being queued; raw mode forwards the plain
+// both-edge intervals instead (for analysing other protocols).
+void radio_rmt_set_raw_mode(bool raw);
+bool radio_rmt_raw_mode(void);
+uint32_t radio_rmt_hcs_reduced(void);
+
 // Number of failed rmt_receive() arm attempts since boot.
 uint32_t radio_rmt_arm_failures(void);
 uint16_t radio_rmt_dropped_frames(void);

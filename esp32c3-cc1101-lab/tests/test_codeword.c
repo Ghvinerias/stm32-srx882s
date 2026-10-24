@@ -75,90 +75,101 @@ int main(void) {
     }
 
     {
-        uint16_t pulses[LAB_TX_MAX_PULSES];
+        static uint16_t pulses[LAB_TX_MAX_PULSES];
         uint8_t bits[LAB_CODEWORD_BITS];
+        lab_tx_build_bits(bits, 2U, 0U, 0U, 0U); // hopping bit 1 set, bit 0 clear
 
-        // hopping=2 -> bits[0]=0, bits[1]=1: header ZERO, then SHORT.
-        size_t n = lab_tx_build_waveform(2U, 0U, 0U, 1U, pulses,
-                                         LAB_TX_MAX_PULSES);
-        expect("one frame is 77 intervals", n == 77U);
+        size_t n = lab_tx_build_waveform(2U, 0U, 0U, 1U, pulses, LAB_TX_MAX_PULSES);
+        expect("one frame is 156 alternating H/L pulses", n == LAB_FRAME_PULSES);
         int preamble_ok = 1;
-        for (size_t i = 0; i < LAB_PREAMBLE_INTERVALS; ++i) {
-            if (pulses[i] != LAB_PREAMBLE_EDGE_US) {
-                preamble_ok = 0;
+        for (unsigned i = 0; i < 11U; ++i) {
+            preamble_ok &= pulses[2U * i] == LAB_TE_US && pulses[2U * i + 1U] == LAB_TE_US;
+        }
+        expect("preamble is 11 x (1 TE high, 1 TE low)", preamble_ok);
+        expect("12th preamble high is 1 TE, header low is 10 TE",
+               pulses[22] == LAB_TE_US && pulses[23] == 10U * LAB_TE_US);
+        expect("bit 0 (=0) is 2 TE high + 1 TE low",
+               pulses[24] == 2U * LAB_TE_US && pulses[25] == LAB_TE_US);
+        expect("bit 1 (=1) is 1 TE high + 2 TE low",
+               pulses[26] == LAB_TE_US && pulses[27] == 2U * LAB_TE_US);
+        expect("frame ends with the idle-low guard",
+               pulses[LAB_FRAME_PULSES - 1U] == LAB_FRAME_IDLE_LOW_US);
+
+        uint16_t periods[LAB_FRAME_PERIODS];
+        expect("frame reduces to 77 falling-edge periods",
+               lab_tx_frame_periods(pulses, n, periods, LAB_FRAME_PERIODS) ==
+                   LAB_FRAME_PERIODS);
+        int pre = 1;
+        for (unsigned i = 0; i < 11U; ++i) pre &= periods[i] == 2U * LAB_TE_US;
+        expect("preamble periods are 2 TE (~790 us like the real remote)", pre);
+        expect("header period is 12 TE for bit0=0",
+               periods[11] == 12U * LAB_TE_US);
+        uint8_t back[LAB_CODEWORD_BITS];
+        expect("periods decode back to the same 66 bits",
+               lab_tx_bits_from_periods(periods, LAB_FRAME_PERIODS, back) &&
+                   memcmp(back, bits, LAB_CODEWORD_BITS) == 0);
+
+        n = lab_tx_build_waveform(1U, 0U, 0U, 1U, pulses, LAB_TX_MAX_PULSES);
+        lab_tx_frame_periods(pulses, n, periods, LAB_FRAME_PERIODS);
+        expect("header period is 11 TE for bit0=1",
+               periods[11] == 11U * LAB_TE_US);
+    }
+
+    {
+        // Every kind of code word must round-trip through PWM -> periods -> bits.
+        static uint16_t pulses[LAB_TX_MAX_PULSES];
+        unsigned bad = 0, total = 0;
+        uint32_t seed = 0xC0FFEE11U;
+        for (unsigned i = 0; i < 4000U; ++i) {
+            seed = seed * 1664525U + 1013904223U;
+            uint32_t hopping = seed;
+            seed = seed * 1664525U + 1013904223U;
+            uint32_t serial = seed & 0x0FFFFFFFU;
+            uint8_t button = (uint8_t)(seed >> 28);
+            if (i == 0U) { hopping = 0U; serial = 0U; button = 0U; }
+            if (i == 1U) { hopping = 0xFFFFFFFFU; serial = 0x0FFFFFFFU; button = 0xFU; }
+            uint8_t frames = (uint8_t)(1U + i % 10U);
+            size_t n = lab_tx_build_waveform(hopping, serial, button, frames,
+                                             pulses, LAB_TX_MAX_PULSES);
+            if (n != (size_t)frames * LAB_FRAME_PULSES) { ++bad; ++total; continue; }
+            for (uint8_t f = 0; f < frames; ++f) {
+                uint8_t want[LAB_CODEWORD_BITS], got[LAB_CODEWORD_BITS];
+                uint16_t per[LAB_FRAME_PERIODS];
+                lab_tx_build_bits(want, hopping, serial, button, f);
+                ++total;
+                if (lab_tx_frame_periods(pulses + (size_t)f * LAB_FRAME_PULSES,
+                                         LAB_FRAME_PULSES, per,
+                                         LAB_FRAME_PERIODS) != LAB_FRAME_PERIODS ||
+                    !lab_tx_bits_from_periods(per, LAB_FRAME_PERIODS, got) ||
+                    memcmp(got, want, LAB_CODEWORD_BITS) != 0) {
+                    ++bad;
+                }
             }
         }
-        expect("11 preamble intervals of 760us", preamble_ok);
-        expect("header is 4512us when bit 0 is 0",
-               pulses[11] == LAB_HEADER_BIT_ZERO_US);
-        expect("0->1 data cell is 795us", pulses[12] == LAB_DATA_SHORT_US);
+        printf("  round-trip: %u/%u frames bad\n", bad, total);
+        expect("4000 random code words round-trip through the PWM waveform", bad == 0U);
 
-        // hopping=1 -> bits[0]=1, bits[1]=0: header ONE, then LONG.
-        n = lab_tx_build_waveform(1U, 0U, 0U, 1U, pulses,
-                                  LAB_TX_MAX_PULSES);
-        expect("header is 4170us when bit 0 is 1",
-               n == 77U && pulses[11] == LAB_HEADER_BIT_ONE_US);
-        expect("1->0 data cell is 1482us", pulses[12] == LAB_DATA_LONG_US);
+        size_t n = lab_tx_build_waveform(0U, 0U, 0U, LAB_TX_MAX_FRAMES, pulses,
+                                         LAB_TX_MAX_PULSES);
+        expect("10 frames fill LAB_TX_MAX_PULSES", n == LAB_TX_MAX_PULSES);
+        expect("capacity too small yields 0",
+               lab_tx_build_waveform(0U, 0U, 0U, 2U, pulses, LAB_FRAME_PULSES) == 0U);
+        expect("frame_count 0 yields 0",
+               lab_tx_build_waveform(0U, 0U, 0U, 0U, pulses, LAB_TX_MAX_PULSES) == 0U);
+    }
 
-        // hopping=0 -> 0->0: MID.
-        n = lab_tx_build_waveform(0U, 0U, 0U, 1U, pulses,
-                                  LAB_TX_MAX_PULSES);
-        expect("equal adjacent bits use the 1138us MID cell",
-               n == 77U && pulses[12] == LAB_DATA_MID_US);
-
-        // The repeat bit changes only the last (bit64 -> bit65) cell.
-        uint16_t frame0[LAB_TX_MAX_PULSES];
-        uint16_t frame1[LAB_TX_MAX_PULSES];
-        size_t n0 = lab_tx_build_waveform(0U, 0U, 0U, 1U, frame0,
-                                          LAB_TX_MAX_PULSES);
-        size_t n1 = lab_tx_build_waveform(0U, 0U, 0U, 2U, frame1,
-                                          LAB_TX_MAX_PULSES);
-        expect("two frames are 77 + gap + 77 intervals",
-               n1 == 155U && frame1[77] == LAB_INTER_FRAME_GAP_US);
-        expect("frame 0 ends VLOW=0 -> repeat=0 with a MID cell",
-               n0 == 77U && frame0[76] == LAB_DATA_MID_US);
-        expect("frame 1 ends VLOW=0 -> repeat=1 with a SHORT cell",
-               n1 == 155U && frame1[154] == LAB_DATA_SHORT_US);
-
-        n = lab_tx_build_waveform(0U, 0U, 0U, LAB_TX_MAX_FRAMES, pulses,
-                                  LAB_TX_MAX_PULSES);
-        expect("ten frames fit the maximum waveform exactly",
-               n == LAB_TX_MAX_PULSES);
-
-        n = lab_tx_build_waveform(0U, 0U, 0U, 1U, pulses, 76U);
-        expect("a too-small output buffer is rejected", n == 0U);
-
-        // Reconstruct the 66 bits from the emitted intervals and compare to
-        // the layout helper, proving the waveform really carries them.
-        uint32_t hopping = 0xBBA8D1CAU;
-        uint32_t serial = 0x0FB58C0CU;
-        lab_tx_build_bits(bits, hopping, serial, 0x02U, 0U);
-        n = lab_tx_build_waveform(hopping, serial, 0x02U, 1U, pulses,
-                                  LAB_TX_MAX_PULSES);
-        uint8_t decoded[LAB_CODEWORD_BITS];
-        int ok = n == 77U;
-        for (size_t i = 0; ok && i < LAB_PREAMBLE_INTERVALS; ++i) {
-            ok = pulses[i] == LAB_PREAMBLE_EDGE_US;
-        }
-        if (ok) {
-            decoded[0] = pulses[11] == LAB_HEADER_BIT_ONE_US ? 1U : 0U;
-            ok = pulses[11] == LAB_HEADER_BIT_ONE_US ||
-                 pulses[11] == LAB_HEADER_BIT_ZERO_US;
-        }
-        for (size_t i = 0; ok && i < 65U; ++i) {
-            uint16_t d = pulses[12U + i];
-            if (d == LAB_DATA_MID_US) {
-                decoded[i + 1U] = decoded[i];
-            } else if (d == LAB_DATA_SHORT_US && decoded[i] == 0U) {
-                decoded[i + 1U] = 1U;
-            } else if (d == LAB_DATA_LONG_US && decoded[i] == 1U) {
-                decoded[i + 1U] = 0U;
-            } else {
-                ok = 0;
-            }
-        }
-        expect("waveform decodes back to the same 66 bits",
-               ok && memcmp(decoded, bits, LAB_CODEWORD_BITS) == 0);
+    {
+        // The measured stale capture (reduced form) must be replayable as PWM.
+        const uint16_t *stale;
+        size_t stale_count = lab_tx_stale_frame(&stale);
+        uint8_t bits[LAB_CODEWORD_BITS];
+        expect("stale capture decodes to a code word",
+               lab_tx_bits_from_periods(stale, stale_count, bits));
+        uint32_t hopping = 0, serial = 0;
+        for (unsigned i = 0; i < 32U; ++i) hopping |= (uint32_t)bits[i] << i;
+        for (unsigned i = 0; i < 28U; ++i) serial |= (uint32_t)bits[32U + i] << i;
+        expect("stale capture is the known identity (hopping 0xBBA8D1CA serial 0xFB58C0C)",
+               hopping == 0xBBA8D1CAU && serial == 0x0FB58C0CU);
     }
 
     return test_result();

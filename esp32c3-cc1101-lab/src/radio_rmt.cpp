@@ -43,6 +43,8 @@ static volatile bool rx_armed;
 static volatile uint32_t rx_queue_overflows;
 static uint16_t dropped_frames;
 static uint32_t arm_failures;
+static volatile bool rx_raw_mode;
+static uint32_t stat_hcs_reduced;
 static volatile uint32_t stat_rx_irq;
 static volatile uint32_t stat_rx_symbols;
 static uint32_t stat_tx_count;
@@ -337,6 +339,9 @@ int radio_rmt_rx_pop(capture_frame_t *out) {
     }
 
     total_edges += (uint32_t)out->pulse_count + 1U;
+    if (!rx_raw_mode && lab_capture_reduce_hcs301(out)) {
+        stat_hcs_reduced++;
+    }
     return 1;
 }
 
@@ -409,3 +414,7 @@ int radio_rmt_gpio_bitbang(const uint16_t *pulses, size_t pulse_count) {
     digitalWrite(LAB_PIN_GDO0_TX, LOW);
     return tx_channel_setup() ? 1 : 0;
 }
+
+void radio_rmt_set_raw_mode(bool raw) { rx_raw_mode = raw; }
+bool radio_rmt_raw_mode(void) { return rx_raw_mode; }
+uint32_t radio_rmt_hcs_reduced(void) { return stat_hcs_reduced; }
