@@ -13,13 +13,22 @@ README explains the shipped app.
 
 ## Scope boundary
 
-This app reconstructs and replays **only the clear-text fields** of an
-HCS301-shaped frame: the 32-bit hopping word *as transmitted* (still
-ciphertext — the app never decrypts it), the 28-bit serial, the 4-bit
-button, VLOW and repeat. It performs no decryption, key derivation, or
-brute-forcing. "Receive, display, select, replay exactly" is the whole
-feature set — the same boundary as `tools/decode_hcs301.py`,
-`firmware/src/lab_tx.c`, and the ESP32 sketch in `esp32-bt-console/`.
+By default this app reconstructs and replays **only the clear-text fields**
+of an HCS301-shaped frame: the 32-bit hopping word *as transmitted* (left as
+ciphertext), the 28-bit serial, the 4-bit button, VLOW and repeat.
+"Receive, display, select, replay exactly" is the baseline feature set — the
+same boundary as `tools/decode_hcs301.py`, `firmware/src/lab_tx.c`, and the
+ESP32 sketch in `esp32-bt-console/`.
+
+The **Keys** tab adds an opt-in diagnostic layer on top of that baseline: a
+user-entered KeeLoq key (64-bit hex, kept app-private in `SharedPreferences`,
+never written to the firmware or committed to git) lets the app decrypt a
+received hop to show its counter and whether the key matches, and lets Send
+build a correctly-encrypted "next code" hop for *your own* receiver, with the
+per-serial counter auto-tracked from what's been seen (or a manual override).
+This only works with a key the user already holds. The app performs no key
+derivation, "learning" from a captured signal, or brute-forcing — there is no
+path from an arbitrary remote's traffic to its key.
 
 Sending always uses the binary packet protocol. The firmware's ASCII
 text-command mode is not used by this app.
@@ -53,13 +62,15 @@ usb.RfLabConnection ──► usb.PacketReassembler ──► protocol.PacketCod
 |---|---|
 | `protocol` | `Cobs` (port of `transport_cobs_encode/decode`), `Crc16` (CRC-16/CCITT-FALSE), `PacketCodec` and the packet types (`FramePacket`, `StatusPacket`, `TxCommand`, `ScenarioCommand`, `AckPacket`). Works on raw bytes after COBS decoding; the trailing `0x00` delimiter is the transport's job. |
 | `usb` | `UsbDeviceFinder` (VID `0xCAFE` / PID `0x4001`, direct `CdcAcmSerialDriver` — the pair is deliberately absent from usb-serial-for-android's prober table), `UsbPermission` (suspend permission request with a 15 s timeout), `PacketReassembler` (arbitrary chunk boundaries, resynchronises after corrupt frames), `RfLabTransport` / `UsbSerialTransport` (byte-stream seam and its USB CDC-ACM implementation, which owns the port parameters and transfer timeouts), `RfLabConnection` (transport + background read loop + writes), `RfLabSession` (the app-wide current connection), `ConnectPort` / `UsbConnectController` (connection-lifecycle seam). |
-| `decode` | `Hcs301Decoder` and `ScaleEstimator`, exact Kotlin ports of `tools/decode_hcs301.py`, plus the measured timing constants. |
+| `decode` | `Hcs301Decoder` and `ScaleEstimator`, exact Kotlin ports of `tools/decode_hcs301.py`, plus the measured timing constants, and `KeeLoqCipher` (the 528-round block cipher, verified against published known-answer vectors). |
+| `crypto` | `KeeLoqKey`/`KeyStorage`/`KeeLoqKeyRepository` — the user-entered, app-private, multi-key keystore; `KeeLoqHop` — decrypt/build the 32-bit hop plaintext (counter, discrimination, button, overflow) under a given key; `CounterStore`/`CounterTracker` — per-serial last-seen-counter tracking with 16-bit wraparound. |
 | `queue` | `SendQueueRepository` — the process-wide `StateFlow<List<SendQueueItem>>`, ids, reorder, frame-count clamp, per-item status. |
 | `send` | `BatchSendEngine` — strict sequential send-then-await-ACK; `SendGraph` — the app's single engine instance. |
 | `ui/connect` | `ConnectViewModel`, `ConnectUiState`, `StatusHeartbeat` (3 s stale threshold, 500 ms poll). |
-| `ui/receive` | `ReceiveViewModel` (transport events → decoded signals), `ReceivedSignalAccumulator` (collapses press repeats within 500 ms on host arrival time), row/format types. |
-| `ui/send` | `SendViewModel` (queue editing, manual hex entry validation, preset scenarios, batch summary), UI state types. |
-| `ui/screens` | Compose screens: a stateful wrapper plus a stateless body, so layouts can be previewed and tested without USB or a ViewModel. |
+| `ui/receive` | `ReceiveViewModel` (transport events → decoded signals, decrypted with the selected key when one is set), `ReceivedSignalAccumulator` (collapses press repeats within 500 ms on host arrival time), row/format types. |
+| `ui/send` | `SendViewModel` (queue editing, manual hex entry validation, preset scenarios, batch summary, "next code" encryption with auto/override counter), UI state types. |
+| `ui/keys` | `KeyManagerViewModel` — add/select/delete keys in the keystore. |
+| `ui/screens` | Compose screens: a stateful wrapper plus a stateless body, so layouts can be previewed and tested without USB or a ViewModel. `KeysScreen` manages the keystore. |
 | `ui` | `RfLabApp` composition root: bottom-nav shell, one `UsbConnectController`, one `BatchSendEngine`, and one activity-scoped `ReceiveViewModel` that decodes from process start. |
 
 ## Build and test
@@ -119,6 +130,13 @@ machine (fake port).
    shows Pending / Sending / Acked OK / Acked failed / Timeout / Link failed.
 4. **Disconnect** on the Connect tab closes the port. Leaving the tab does
    not disconnect, and the Receive list keeps decoding in the background.
+5. **Keys** (optional) — add a key you already hold (name + 64-bit hex).
+   The newest/selected key becomes active across the app. With a key
+   selected, Receive shows each row's decrypted counter and whether it
+   matches that key; Send's "Next code" card lets you pick a serial/button,
+   fills the counter from the tracker (last seen + 1, or type an override),
+   and queues a correctly-encrypted hop for your own receiver. Keys never
+   leave the phone and are never written to the firmware.
 
 ## Error handling
 
