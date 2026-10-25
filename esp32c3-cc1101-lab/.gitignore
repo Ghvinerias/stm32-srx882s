@@ -1,0 +1,21 @@
+# Host test binaries
+tests/test_transport
+tests/test_codeword
+tests/test_capture
+tests/test_command
+tests/test_rxsim
+tests/test_app_packets
+tests/test_ota
+
+# Per-unit build override (see README §4)
+build_opt.h
+tests/test_usb_policy
+tests/test_ble_link
+
+# Built images embed the OTA secret: never commit them or the served copies
+dist/
+flashsite/fw/
+tests/test_cc1101_regs
+tests/test_hcs_reduce
+tests/test_mode
+tests/test_stream

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">STM32 RF Lab</string>
+    <string name="nav_connect">Connect</string>
+    <string name="nav_receive">Receive</string>
+    <string name="nav_send">Send</string>
+    <string name="nav_firmware">Firmware</string>
+    <string name="nav_keys">Keys</string>
+</resources>

@@ -1,5 +1,5 @@
 #include "transport.h"
-#include "uart_out.h"
+#include "usb_cdc.h"
 
 #define HEADER_SIZE 18U
 #define CRC_SIZE 2U
@@ -84,6 +84,50 @@ size_t transport_cobs_encode(const uint8_t *input, size_t input_length,
     return write_index;
 }
 
+size_t transport_cobs_decode(const uint8_t *input, size_t input_length,
+                             uint8_t *output, size_t output_capacity) {
+    if (!input || !output) {
+        return 0;
+    }
+    size_t read_index = 0;
+    size_t write_index = 0;
+    while (read_index < input_length) {
+        uint8_t code = input[read_index];
+        if (code == 0U || read_index + code > input_length + 1U) {
+            return 0;
+        }
+        read_index++;
+        for (uint8_t i = 1U; i < code; ++i) {
+            if (read_index >= input_length || write_index >= output_capacity) {
+                return 0;
+            }
+            output[write_index++] = input[read_index++];
+        }
+        if (code != 0xFFU && read_index < input_length) {
+            if (write_index >= output_capacity) {
+                return 0;
+            }
+            output[write_index++] = 0;
+        }
+    }
+    return write_index;
+}
+
+static int send_raw(const uint8_t *raw, size_t raw_length) {
+    size_t encoded_length = transport_cobs_encode(raw, raw_length,
+                                                  encoded_packet,
+                                                  sizeof(encoded_packet));
+    int sent = encoded_length != 0 &&
+               usb_cdc_write(encoded_packet, encoded_length);
+    if (!sent) {
+        if (dropped_packets != UINT16_MAX) {
+            dropped_packets++;
+        }
+        return 0;
+    }
+    return 1;
+}
+
 static int send_packet(uint8_t type, uint16_t flags, uint32_t timestamp,
                        uint16_t capture_drops, uint8_t initial_level,
                        const uint16_t *pulses, uint16_t pulse_count) {
@@ -109,22 +153,25 @@ static int send_packet(uint8_t type, uint16_t flags, uint32_t timestamp,
     uint16_t crc = transport_crc16(raw_packet, raw_length - CRC_SIZE);
     put_u16(raw_packet, raw_length - CRC_SIZE, crc);
 
-    size_t encoded_length = transport_cobs_encode(raw_packet, raw_length,
-                                                  encoded_packet,
-                                                  sizeof(encoded_packet));
-    if (encoded_length == 0 || !uart_write(encoded_packet, encoded_length)) {
-        if (dropped_packets != UINT16_MAX) {
-            dropped_packets++;
-        }
-        return 0;
-    }
-    return 1;
+    return send_raw(raw_packet, raw_length);
 }
 
 void transport_init(uint16_t boot_flags) {
     next_sequence = 0;
     dropped_packets = 0;
     persistent_flags = boot_flags;
+}
+
+int transport_send_ack(uint8_t for_type, uint8_t accepted) {
+    uint8_t ack[6];
+    ack[0] = TRANSPORT_VERSION;
+    ack[1] = TRANSPORT_TYPE_ACK;
+    ack[2] = for_type;
+    ack[3] = accepted;
+    uint16_t crc = transport_crc16(ack, 4U);
+    ack[4] = (uint8_t)(crc & 0xFFU);
+    ack[5] = (uint8_t)(crc >> 8U);
+    return send_raw(ack, sizeof(ack));
 }
 
 int transport_send_status(uint32_t clock_hz, uint16_t capture_drops,

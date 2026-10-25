@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+        Firmware "Update to latest": HTTPS GETs to the lab's firmware web
+        server (serve_flash.py, trust-on-first-use pinned certificate). No
+        cleartext is intended or allowed — the app rejects http:// URLs.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+        Bluetooth Classic SPP (RFCOMM) to the original ESP32 build, and BLE
+        (Nordic UART Service) to the ESP32-C3 + CC1101 build.
+
+        BLUETOOTH_CONNECT (API 31+ runtime) covers opening a GATT/RFCOMM link
+        for both. The SPP path only talks to already-bonded devices and never
+        scans; the BLE path must scan, because the C3's NUS peripheral is not
+        bonded — hence BLUETOOTH_SCAN on API 31+ (flagged neverForLocation so
+        no location data is derived) and ACCESS_FINE_LOCATION on API 23–30,
+        where a BLE scan is location-gated (declared with the COARSE
+        counterpart, which the platform requires alongside FINE). Below 31 the
+        legacy BLUETOOTH pair is granted at install time.
+    -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.ACCESS_COARSE_LOCATION"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
+
+    <!--
+        Either transport is enough: USB for the STM32 board, Bluetooth for the
+        ESP32 board. Both are optional so the app installs on hardware that
+        only offers one of them.
+    -->
+    <uses-feature
+        android:name="android.hardware.usb.host"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.bluetooth"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.bluetooth_le"
+        android:required="false" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.RfLab">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Offer to open the app when the lab board (VID 0xCAFE / PID 0x4001) is plugged in. -->
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/device_filter" />
+        </activity>
+    </application>
+
+</manifest>

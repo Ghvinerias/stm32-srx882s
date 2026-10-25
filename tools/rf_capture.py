@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Capture and decode STM32 RF analyzer binary packets."""
+"""Capture and decode STM32 RF analyzer binary packets.
+
+Also understands the ACK reply (with its raw accepted byte: 0 = rejected/
+busy, 1 = complete, 2 = TX aborted by MODE IDLE) and decodes the radio mode
+the ESP32-C3/CC1101 firmware carries in STATUS header flags bits 2..3.
+"""
 
 from __future__ import annotations
 
@@ -18,9 +23,18 @@ from typing import BinaryIO, Iterator
 VERSION = 1
 TYPE_FRAME = 1
 TYPE_STATUS = 2
+TYPE_ACK = 5
 HEADER = struct.Struct("<BBHHHIHHBB")
 CRC = struct.Struct("<H")
 MAX_ENCODED_PACKET = 1024
+
+# STATUS header flags bits 2..3 carry the radio mode (IDLE/RX/TX).
+MODE_FLAG_SHIFT = 2
+MODE_FLAG_MASK = 0x0003
+MODE_IDLE = 0
+MODE_RX = 1
+MODE_TX = 2
+MODE_NAMES = {MODE_IDLE: "idle", MODE_RX: "rx", MODE_TX: "tx"}
 
 
 class PacketError(ValueError):
@@ -80,18 +94,35 @@ def cobs_decode(data: bytes) -> bytes:
 
 def parse_packet(encoded: bytes) -> dict:
     raw = cobs_decode(encoded)
-    if len(raw) < HEADER.size + CRC.size:
-        raise PacketError("packet shorter than header")
+    if len(raw) < 2 + CRC.size:
+        raise PacketError("packet too short")
 
     expected_crc = CRC.unpack_from(raw, len(raw) - CRC.size)[0]
     actual_crc = crc16_ccitt(raw[:-CRC.size])
     if actual_crc != expected_crc:
         raise PacketError(f"CRC mismatch: expected {expected_crc:04x}, got {actual_crc:04x}")
 
-    (version, message_type, flags, sequence, packet_length, timestamp_us,
-     dropped_frames, pulse_count, initial_level, receiver_id) = HEADER.unpack_from(raw)
+    version, message_type = raw[0], raw[1]
     if version != VERSION:
         raise PacketError(f"unsupported protocol version {version}")
+
+    if message_type == TYPE_ACK:
+        if len(raw) != 6:
+            raise PacketError("malformed ACK length")
+        accepted_raw = raw[3]
+        return {
+            "version": version,
+            "type": "ack",
+            "for_type": raw[2],
+            # 0 = rejected/busy, 1 = complete, 2 = TX aborted by MODE IDLE
+            "accepted": accepted_raw != 0,
+            "accepted_raw": accepted_raw,
+        }
+
+    if len(raw) < HEADER.size + CRC.size:
+        raise PacketError("packet shorter than header")
+    (_, _, flags, sequence, packet_length, timestamp_us,
+     dropped_frames, pulse_count, initial_level, receiver_id) = HEADER.unpack_from(raw)
     if packet_length != len(raw):
         raise PacketError(f"length field {packet_length} does not match {len(raw)} bytes")
     if packet_length != HEADER.size + pulse_count * 2 + CRC.size:
@@ -110,6 +141,10 @@ def parse_packet(encoded: bytes) -> dict:
     }
 
     if message_type == TYPE_STATUS:
+        packet["mode"] = (flags >> MODE_FLAG_SHIFT) & MODE_FLAG_MASK
+        packet["mode_name"] = MODE_NAMES.get(
+            packet["mode"], f"unknown({packet['mode']})"
+        )
         if len(pulses) >= 2:
             packet["clock_hz"] = pulses[0] | pulses[1] << 16
         if len(pulses) >= 4:

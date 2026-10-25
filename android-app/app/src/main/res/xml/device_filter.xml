@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      STM32 "Blue Pill RF Lab" CDC-ACM device: VID 0xCAFE, PID 0x4001.
+      Android's USB device-filter parser expects decimal values here:
+        0xCAFE = 51966
+        0x4001 = 16385
+      This VID/PID is deliberately not left to usb-serial-for-android's
+      default prober; sessions 4+ match it explicitly and instantiate
+      CdcAcmSerialDriver directly.
+    -->
+    <usb-device
+        vendor-id="51966"
+        product-id="16385" />
+    <!--
+      ESP32-C3 "CC1101 RF Lab" CDC-ACM device: VID 0x303A (Espressif), PID
+      0x1001. Decimal here too:
+        0x303A = 12346
+        0x1001 = 4097
+      Matched explicitly in UsbDeviceFinder alongside the STM32 pair above.
+    -->
+    <usb-device
+        vendor-id="12346"
+        product-id="4097" />
+</resources>
