@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
@@ -49,6 +50,7 @@ private enum class Destination(
     Connect("connect", R.string.nav_connect, Icons.Default.Settings),
     Receive("receive", R.string.nav_receive, Icons.Default.List),
     Send("send", R.string.nav_send, Icons.Default.Send),
+    Keys("keys", R.string.nav_keys, Icons.Default.Lock),
     Firmware("firmware", R.string.nav_firmware, Icons.Default.Build),
 }
 
@@ -106,6 +108,19 @@ fun RfLabApp() {
     // process death, and remember keeps the same instance across tabs.
     val favoritesRepository = remember(appContext) {
         FavoritesRepository(SharedPreferencesFavoriteStorage.create(appContext))
+    }
+    // The user's KeeLoq keystore and per-serial counter tracker, both
+    // app-private. Keys stay on the phone; the counter tracker lets "send next
+    // code" default to the last counter seen + 1.
+    val keyRepository = remember(appContext) {
+        com.eelab.rflab.crypto.KeeLoqKeyRepository(
+            com.eelab.rflab.crypto.SharedPreferencesKeyStorage.create(appContext),
+        )
+    }
+    val counterTracker = remember(appContext) {
+        com.eelab.rflab.crypto.CounterTracker(
+            com.eelab.rflab.crypto.SharedPreferencesCounterStore.create(appContext),
+        )
     }
     // One process-wide OTA secret store: a dedicated SharedPreferences file
     // (same storage mechanism as the favorites) holding the validated
@@ -185,6 +200,13 @@ fun RfLabApp() {
                 SendScreen(
                     sendEngine = sendEngine,
                     favoritesRepository = favoritesRepository,
+                )
+            }
+            composable(Destination.Keys.route) {
+                com.eelab.rflab.ui.screens.KeysScreen(
+                    viewModel = androidx.lifecycle.viewmodel.compose.viewModel(
+                        factory = com.eelab.rflab.ui.keys.KeyManagerViewModel.factory(keyRepository),
+                    ),
                 )
             }
             composable(Destination.Firmware.route) {
