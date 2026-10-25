@@ -61,7 +61,14 @@ class SendViewModel(
     private val favoritesRepository: FavoritesRepository,
     connectionStatus: Flow<Boolean> = flowOf(true),
     private val stopSender: suspend () -> Boolean = { true },
+    selectedKey: Flow<com.eelab.rflab.crypto.KeeLoqKey?> = flowOf(null),
+    private val nextCounterFor: (serial: Long) -> Int? = { null },
+    private val observeCounter: (serial: Long, counter: Int) -> Unit = { _, _ -> },
 ) : ViewModel() {
+
+    /** The keystore key selected for "next code", read when computing a hop. */
+    @Volatile
+    private var currentKey: com.eelab.rflab.crypto.KeeLoqKey? = null
 
     /** Guards against two overlapping "Send All" coroutines. */
     private var sendBatchJob: Job? = null
@@ -93,6 +100,116 @@ class SendViewModel(
                 _uiState.update { it.copy(isConnected = connected) }
             }
         }
+        viewModelScope.launch {
+            selectedKey.collect { key ->
+                currentKey = key
+                _uiState.update { it.copy(nextCode = it.nextCode.copy(keyName = key?.name)) }
+            }
+        }
+    }
+
+    // --- Next code (rolling code to the user's own receiver) ----------------
+
+    fun onNextSerialChange(value: String) = _uiState.update {
+        it.copy(nextCode = it.nextCode.copy(serialHex = value, serialError = null))
+            .let(::withAutoCounterHint)
+    }
+
+    fun onNextButtonChange(value: String) = _uiState.update {
+        it.copy(nextCode = it.nextCode.copy(buttonHex = value, buttonError = null))
+    }
+
+    fun onNextFramesChange(value: String) = _uiState.update {
+        it.copy(nextCode = it.nextCode.copy(framesText = value, framesError = null))
+    }
+
+    fun onNextCounterOverrideChange(value: String) = _uiState.update {
+        it.copy(nextCode = it.nextCode.copy(counterOverrideHex = value, counterError = null))
+    }
+
+    /** Refresh the auto-counter hint (last seen + 1) for the typed serial. */
+    private fun withAutoCounterHint(state: SendUiState): SendUiState {
+        val serial = parseHex(
+            state.nextCode.serialHex, "Serial", TxCommand.SERIAL_MASK, "28 bits (7 hex digits)",
+        ).value
+        val hint = serial?.let(nextCounterFor)
+        return state.copy(nextCode = state.nextCode.copy(autoCounterHint = hint))
+    }
+
+    /**
+     * Compute the next rolling code with the selected key and enqueue it.
+     *
+     * The counter comes from the manual override when set, otherwise from the
+     * per-serial tracker (last seen + 1). With no key selected, or no counter
+     * available and no override, the action fails with a field message and
+     * nothing is queued. On success the tracker is advanced so the next call
+     * auto-increments.
+     */
+    fun enqueueNextCode(): Boolean {
+        val form = _uiState.value.nextCode
+        val key = currentKey
+        if (key == null) {
+            _uiState.update { it.copy(message = "Select a key on the Keys tab first") }
+            return false
+        }
+        val serial = parseHex(form.serialHex, "Serial", TxCommand.SERIAL_MASK, "28 bits (7 hex digits)")
+        val button = parseButton(form.buttonHex)
+        val frames = parseFrames(form.framesText)
+        val override = form.counterOverrideHex.trim()
+        val counter: Int? = if (override.isNotEmpty()) {
+            override.toIntOrNull(16)?.takeIf { it in 0..0xFFFF }
+        } else {
+            serial.value?.let(nextCounterFor)
+        }
+        val counterError = when {
+            override.isNotEmpty() && counter == null -> "Counter must be 0-FFFF hex"
+            override.isEmpty() && serial.value != null && counter == null ->
+                "No counter seen yet — receive a press or enter one"
+            else -> null
+        }
+
+        val updated = form.copy(
+            serialError = serial.error,
+            buttonError = button.error,
+            framesError = frames.error,
+            counterError = counterError,
+        )
+        val serialValue = serial.value
+        val buttonValue = button.value
+        val framesValue = frames.value
+        if (serialValue == null || buttonValue == null || framesValue == null || counter == null) {
+            _uiState.update { it.copy(nextCode = updated, message = "Fix the highlighted fields") }
+            return false
+        }
+
+        val hop = com.eelab.rflab.crypto.KeeLoqHop.build(
+            key = key.key,
+            button = buttonValue,
+            discrimination = com.eelab.rflab.crypto.KeeLoqHop.discriminationFromSerial(serialValue),
+            counter = counter,
+        )
+        val command = TxCommand(
+            hopping = hop.toLong() and 0xFFFFFFFFL,
+            serial = serialValue,
+            button = buttonValue,
+            frameCount = framesValue,
+        )
+        sendQueue.enqueue(command)
+        // Advance the tracker so a repeated "next code" keeps incrementing.
+        observeCounter(serialValue, counter)
+        _uiState.update {
+            it.copy(
+                items = sendQueue.items.value,
+                nextCode = NextCodeState(
+                    keyName = key.name,
+                    autoCounterHint = nextCounterFor(serialValue),
+                ),
+                message = "Queued code for serial ${
+                    "0x%07X".format(serialValue)
+                }, counter $counter (${sendQueue.items.value.size} queued)",
+            )
+        }
+        return true
     }
 
     // --- Manual entry -------------------------------------------------------
@@ -418,6 +535,9 @@ class SendViewModel(
             favoritesRepository: FavoritesRepository,
             connectionStatus: Flow<Boolean> = flowOf(true),
             stopSender: suspend () -> Boolean = { true },
+            selectedKey: Flow<com.eelab.rflab.crypto.KeeLoqKey?> = flowOf(null),
+            nextCounterFor: (serial: Long) -> Int? = { null },
+            observeCounter: (serial: Long, counter: Int) -> Unit = { _, _ -> },
         ): ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 SendViewModel(
@@ -426,6 +546,9 @@ class SendViewModel(
                     favoritesRepository = favoritesRepository,
                     connectionStatus = connectionStatus,
                     stopSender = stopSender,
+                    selectedKey = selectedKey,
+                    nextCounterFor = nextCounterFor,
+                    observeCounter = observeCounter,
                 )
             }
         }

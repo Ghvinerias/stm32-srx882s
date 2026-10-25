@@ -82,12 +82,19 @@ fun SendScreen(
     modifier: Modifier = Modifier,
     sendEngine: BatchSendEngine = SendGraph.engine,
     favoritesRepository: FavoritesRepository,
+    selectedKey: kotlinx.coroutines.flow.Flow<com.eelab.rflab.crypto.KeeLoqKey?> =
+        kotlinx.coroutines.flow.flowOf(null),
+    nextCounterFor: (serial: Long) -> Int? = { null },
+    observeCounter: (serial: Long, counter: Int) -> Unit = { _, _ -> },
     viewModel: SendViewModel = viewModel(
         factory = SendViewModel.factory(
             batchSender = sendEngine::sendBatch,
             favoritesRepository = favoritesRepository,
             connectionStatus = RfLabSession.isConnected,
             stopSender = sendEngine::stopTransmit,
+            selectedKey = selectedKey,
+            nextCounterFor = nextCounterFor,
+            observeCounter = observeCounter,
         ),
     ),
 ) {
@@ -100,6 +107,11 @@ fun SendScreen(
         onButtonChange = viewModel::onButtonChange,
         onFramesChange = viewModel::onFramesChange,
         onAddManualEntry = { viewModel.addManualEntry() },
+        onNextSerialChange = viewModel::onNextSerialChange,
+        onNextButtonChange = viewModel::onNextButtonChange,
+        onNextFramesChange = viewModel::onNextFramesChange,
+        onNextCounterOverrideChange = viewModel::onNextCounterOverrideChange,
+        onEnqueueNextCode = { viewModel.enqueueNextCode() },
         onRemoveItem = viewModel::removeItem,
         onMoveItemUp = viewModel::moveItemUp,
         onMoveItemDown = viewModel::moveItemDown,
@@ -127,6 +139,11 @@ internal fun SendScreen(
     onButtonChange: (String) -> Unit,
     onFramesChange: (String) -> Unit,
     onAddManualEntry: () -> Unit,
+    onNextSerialChange: (String) -> Unit = {},
+    onNextButtonChange: (String) -> Unit = {},
+    onNextFramesChange: (String) -> Unit = {},
+    onNextCounterOverrideChange: (String) -> Unit = {},
+    onEnqueueNextCode: () -> Unit = {},
     onRemoveItem: (Long) -> Unit,
     onMoveItemUp: (Long) -> Unit,
     onMoveItemDown: (Long) -> Unit,
@@ -156,6 +173,17 @@ internal fun SendScreen(
                     onButtonChange = onButtonChange,
                     onFramesChange = onFramesChange,
                     onAddManualEntry = onAddManualEntry,
+                )
+            }
+
+            item(key = "next-code") {
+                NextCodeCard(
+                    state = state.nextCode,
+                    onSerialChange = onNextSerialChange,
+                    onButtonChange = onNextButtonChange,
+                    onFramesChange = onNextFramesChange,
+                    onCounterOverrideChange = onNextCounterOverrideChange,
+                    onEnqueue = onEnqueueNextCode,
                 )
             }
 
@@ -335,6 +363,94 @@ private fun ManualEntryCard(
                 )
                 Spacer(Modifier.width(8.dp))
                 Text("Add to queue")
+            }
+        }
+    }
+}
+
+@Composable
+private fun NextCodeCard(
+    state: com.eelab.rflab.ui.send.NextCodeState,
+    onSerialChange: (String) -> Unit,
+    onButtonChange: (String) -> Unit,
+    onFramesChange: (String) -> Unit,
+    onCounterOverrideChange: (String) -> Unit,
+    onEnqueue: () -> Unit,
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "Next code (your own receiver)",
+                style = MaterialTheme.typography.titleMedium,
+            )
+            if (state.keyName == null) {
+                Text(
+                    text = "Select a key on the Keys tab to send a rolling code.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                Text(
+                    text = "Key: ${state.keyName}. The counter is filled from the last " +
+                        "one seen for this serial; override it below if needed.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+
+            HexField(
+                value = state.serialHex,
+                onValueChange = onSerialChange,
+                label = "Serial (max 7 hex digits)",
+                error = state.serialError,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                HexField(
+                    value = state.buttonHex,
+                    onValueChange = onButtonChange,
+                    label = "Button (0-F)",
+                    error = state.buttonError,
+                    modifier = Modifier.weight(1f),
+                )
+                OutlinedTextField(
+                    value = state.framesText,
+                    onValueChange = onFramesChange,
+                    label = { Text("Frames (1-255)") },
+                    singleLine = true,
+                    isError = state.framesError != null,
+                    supportingText = errorSupportingText(state.framesError),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            HexField(
+                value = state.counterOverrideHex,
+                onValueChange = onCounterOverrideChange,
+                label = state.autoCounterHint?.let { "Counter override (auto: $it)" }
+                    ?: "Counter (hex, 0-FFFF)",
+                error = state.counterError,
+            )
+
+            Button(
+                onClick = onEnqueue,
+                enabled = state.canQueue,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Add,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Queue next code")
             }
         }
     }

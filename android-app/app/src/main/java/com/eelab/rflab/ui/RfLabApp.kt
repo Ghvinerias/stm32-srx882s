@@ -210,6 +210,9 @@ fun RfLabApp() {
                 SendScreen(
                     sendEngine = sendEngine,
                     favoritesRepository = favoritesRepository,
+                    selectedKey = selectedKeyFlow,
+                    nextCounterFor = counterTracker::next,
+                    observeCounter = counterTracker::observe,
                 )
             }
             composable(Destination.Keys.route) {

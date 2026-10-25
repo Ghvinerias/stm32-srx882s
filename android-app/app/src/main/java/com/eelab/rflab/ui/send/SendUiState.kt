@@ -25,6 +25,7 @@ data class SendUiState(
     val isSending: Boolean = false,
     val favorites: List<FavoriteQueue> = emptyList(),
     val favoriteName: String = "",
+    val nextCode: NextCodeState = NextCodeState(),
 ) {
     val canSendAll: Boolean get() = items.isNotEmpty() && isConnected && !isSending
 
@@ -58,6 +59,35 @@ data class ManualEntryState(
             serialError != null ||
             buttonError != null ||
             framesError != null
+}
+
+/**
+ * "Next code" form: transmit the next valid rolling code to a receiver the
+ * user holds the key for.
+ *
+ * The user enters the target serial, button and frame count; the counter is
+ * filled automatically from the per-serial tracker (last seen + 1) and shown
+ * in [autoCounterHint], or the user types an override. The app computes the
+ * encrypted hop with the selected key — the user never handles ciphertext.
+ *
+ * @property keyName the selected key's name, or null when no key is selected
+ *   (the action is disabled and the UI points to the Keys tab).
+ * @property autoCounterHint the auto counter that will be used when the
+ *   override is blank, or null when nothing has been seen for this serial yet.
+ */
+data class NextCodeState(
+    val serialHex: String = "",
+    val buttonHex: String = "",
+    val framesText: String = SendQueueItem.DEFAULT_FRAME_COUNT.toString(),
+    val counterOverrideHex: String = "",
+    val serialError: String? = null,
+    val buttonError: String? = null,
+    val framesError: String? = null,
+    val counterError: String? = null,
+    val keyName: String? = null,
+    val autoCounterHint: Int? = null,
+) {
+    val canQueue: Boolean get() = keyName != null && serialHex.isNotBlank() && buttonHex.isNotBlank()
 }
 
 /**
