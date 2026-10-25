@@ -55,9 +55,17 @@ object KeeLoqCipher {
      * Rounds run the key schedule in reverse (bit `(527 - r) mod 64`) and
      * shift the feedback bit in at the bottom.
      */
-    fun decrypt(data: Int, key: Long): Int {
+    fun decrypt(data: Int, key: Long): Int = decryptRounds(data, key, 528)
+
+    /**
+     * [decrypt], but stopping after [rounds] iterations instead of the full
+     * 528. A few manufacturer-specific derivations (e.g. AERF) reuse this
+     * exact round structure with a truncated count instead of the full
+     * cipher.
+     */
+    fun decryptRounds(data: Int, key: Long, rounds: Int): Int {
         var x = data.toLong() and 0xFFFFFFFFL
-        for (r in 0 until 528) {
+        for (r in 0 until rounds) {
             val nlf = bit(NLF, nlfIndex(x, 30, 25, 19, 8, 0))
             val keyBit = ((key ushr ((527 - r) and 63)) and 1L).toInt()
             val feedback = bit(x, 31) xor bit(x, 15) xor keyBit xor nlf

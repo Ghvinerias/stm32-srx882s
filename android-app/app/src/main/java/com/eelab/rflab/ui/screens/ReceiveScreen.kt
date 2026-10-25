@@ -141,6 +141,11 @@ private fun ReceiveHeader(
                 style = MaterialTheme.typography.titleLarge,
             )
             Text(
+                text = "Protocol: KeeLoq/HCS301 — the only one this app decodes",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
                 text = when (state.rows.size) {
                     0 -> "Waiting for frames"
                     1 -> "1 signal"
@@ -298,25 +303,34 @@ private fun ReceivedSignalCard(
                         RepeatBadge(row.repeatCount)
                     }
                 }
+                // Decoded, not decrypted: the clear-text fields as transmitted.
                 Text(
-                    text = "Hopping ${SignalFormat.hopping(row.hopping)}",
+                    text = "Hop (ciphertext, as received) ${SignalFormat.hopping(row.hopping)}",
                     style = MaterialTheme.typography.bodyMedium,
                     fontFamily = FontFamily.Monospace,
                 )
                 Text(
                     text = "Serial ${SignalFormat.serial(row.serial)}  " +
-                        "Button ${SignalFormat.button(row.button)}",
+                        "Button ${SignalFormat.button(row.button)}  (decoded, clear-text)",
                     style = MaterialTheme.typography.bodyMedium,
                     fontFamily = FontFamily.Monospace,
                 )
                 // Only shown when a key is selected that matches this remote
-                // (the decrypt's button nibble equals the clear button).
+                // (the decrypt's button nibble equals the clear button). This
+                // line, unlike the two above, is a result of cryptographic
+                // processing with the selected key - not a decoded field.
                 if (row.keyMatches && row.decryptedCounter != null) {
                     Text(
-                        text = "Counter ${row.decryptedCounter}  (key matches)",
+                        text = "Counter ${row.decryptedCounter}  (decrypted, key matches)",
                         style = MaterialTheme.typography.bodyMedium,
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.primary,
+                    )
+                } else if (row.decryptedCounter == null) {
+                    Text(
+                        text = "Counter unavailable (no key selected or key does not match)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }

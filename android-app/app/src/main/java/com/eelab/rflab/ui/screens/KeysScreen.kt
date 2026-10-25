@@ -31,6 +31,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.eelab.rflab.crypto.KeeLoqKey
+import com.eelab.rflab.crypto.KeyPurpose
+import com.eelab.rflab.crypto.usageDescription
 import com.eelab.rflab.ui.keys.KeyManagerViewModel
 
 /**
@@ -87,6 +89,14 @@ fun KeysScreen(
             modifier = Modifier.fillMaxWidth(),
         ) { Text("Add key") }
 
+        state.keys.firstOrNull { it.id == state.selectedId }?.let { active ->
+            Text(
+                active.purpose.usageDescription(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+            )
+        }
+
         Text("Stored keys (${state.keys.size})", style = MaterialTheme.typography.titleSmall)
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(state.keys, key = { it.id }) { key ->
@@ -118,7 +128,18 @@ private fun KeyRow(
             RadioButton(selected = selected, onClick = onSelect)
             Spacer(Modifier.width(4.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(key.name, style = MaterialTheme.typography.bodyLarge)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(key.name, style = MaterialTheme.typography.bodyLarge)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        when (key.purpose) {
+                            KeyPurpose.DEVICE -> "DEVICE"
+                            KeyPurpose.MANUFACTURER -> "MANUFACTURER"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Text(
                     // Masked: show only the last 4 hex digits so a shoulder
                     // glance does not reveal the whole key.

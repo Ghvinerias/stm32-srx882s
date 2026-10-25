@@ -58,7 +58,8 @@ class SharedPreferencesKeyStorage(
                     .put(KEY_NAME, k.name)
                     // Stored as a hex string so the full 64-bit value round-trips
                     // without JSON number/precision surprises.
-                    .put(KEY_VALUE, java.lang.Long.toHexString(k.key)),
+                    .put(KEY_VALUE, java.lang.Long.toHexString(k.key))
+                    .put(KEY_PURPOSE, k.purpose.name),
             )
         }
         root.put(KEY_KEYS, array)
@@ -78,6 +79,11 @@ class SharedPreferencesKeyStorage(
                             id = o.getLong(KEY_ID),
                             name = o.getString(KEY_NAME),
                             key = java.lang.Long.parseUnsignedLong(o.getString(KEY_VALUE), 16),
+                            // Absent on documents written before FORMAT_VERSION 2
+                            // (and tolerant of an unrecognized future value):
+                            // every such key was a device key.
+                            purpose = runCatching { KeyPurpose.valueOf(o.optString(KEY_PURPOSE)) }
+                                .getOrDefault(KeyPurpose.DEVICE),
                         ),
                     )
                 }
@@ -98,7 +104,8 @@ class SharedPreferencesKeyStorage(
         private const val KEY_ID = "id"
         private const val KEY_NAME = "name"
         private const val KEY_VALUE = "value_hex"
-        private const val FORMAT_VERSION = 1
+        private const val KEY_PURPOSE = "purpose"
+        private const val FORMAT_VERSION = 2
         private const val TAG = "KeyStorage"
 
         fun create(context: Context): SharedPreferencesKeyStorage =

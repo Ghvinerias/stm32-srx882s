@@ -36,14 +36,16 @@ class KeeLoqKeyRepository(
     fun selected(): KeeLoqKey? = _keys.value.firstOrNull { it.id == _selectedId.value }
 
     /**
-     * Add a key named [name] with raw 64-bit [value]. A blank name is
-     * rejected. Adding the first key selects it.
+     * Add a key named [name] with raw 64-bit [value] and [purpose]
+     * (defaults to [KeyPurpose.DEVICE], matching every key added before
+     * purposes existed). A blank name is rejected. Adding the first key
+     * selects it.
      */
     @Synchronized
-    fun add(name: String, value: Long): KeeLoqKey {
+    fun add(name: String, value: Long, purpose: KeyPurpose = KeyPurpose.DEVICE): KeeLoqKey {
         val trimmed = name.trim()
         require(trimmed.isNotEmpty()) { "key name must not be blank" }
-        val created = KeeLoqKey(id = nextId++, name = trimmed, key = value)
+        val created = KeeLoqKey(id = nextId++, name = trimmed, key = value, purpose = purpose)
         commit(listOf(created) + _keys.value)
         if (_selectedId.value == null) _selectedId.value = created.id
         return created

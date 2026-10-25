@@ -70,6 +70,15 @@ class KeeLoqKeyRepositoryTest {
     }
 
     @Test
+    fun addDefaultsToDevicePurposeAndHonorsAnExplicitOne() {
+        val repo = KeeLoqKeyRepository(FakeStorage())
+        val device = repo.add("Garage", 1)
+        val manufacturer = repo.add("Dealer master", 2, KeyPurpose.MANUFACTURER)
+        assertEquals(KeyPurpose.DEVICE, device.purpose)
+        assertEquals(KeyPurpose.MANUFACTURER, manufacturer.purpose)
+    }
+
+    @Test
     fun existingKeysAreLoadedAtConstruction() {
         val storage = FakeStorage(listOf(KeeLoqKey(id = 5, name = "saved", key = 0xABCDL)))
         val repo = KeeLoqKeyRepository(storage)

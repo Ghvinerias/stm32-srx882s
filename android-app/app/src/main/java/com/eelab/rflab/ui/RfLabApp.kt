@@ -1,12 +1,6 @@
 package com.eelab.rflab.ui
 
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.List
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Send
-import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -16,46 +10,43 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
+import androidx.navigation.NavHostController
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.eelab.rflab.R
 import com.eelab.rflab.ble.AndroidBleLink
 import com.eelab.rflab.bluetooth.AndroidBluetoothLink
 import com.eelab.rflab.favorites.FavoritesRepository
 import com.eelab.rflab.favorites.SharedPreferencesFavoriteStorage
 import com.eelab.rflab.ota.OtaGraph
 import com.eelab.rflab.ota.OtaSecretStore
+import com.eelab.rflab.protocol.CapabilityAction
 import com.eelab.rflab.send.SendGraph
 import com.eelab.rflab.ui.receive.ReceiveViewModel
 import com.eelab.rflab.ui.screens.ConnectScreen
 import com.eelab.rflab.ui.screens.FirmwareScreen
+import com.eelab.rflab.ui.screens.ProtocolCatalogScreen
+import com.eelab.rflab.ui.screens.ProtocolDetailScreen
 import com.eelab.rflab.ui.screens.ReceiveScreen
 import com.eelab.rflab.ui.screens.SendScreen
+import com.eelab.rflab.ui.screens.StaticCodesScreen
 import com.eelab.rflab.usb.RfLabSession
 import com.eelab.rflab.usb.UsbConnectController
-
-private enum class Destination(
-    val route: String,
-    val labelRes: Int,
-    val icon: ImageVector,
-) {
-    Connect("connect", R.string.nav_connect, Icons.Default.Settings),
-    Receive("receive", R.string.nav_receive, Icons.Default.List),
-    Send("send", R.string.nav_send, Icons.Default.Send),
-    Keys("keys", R.string.nav_keys, Icons.Default.Lock),
-    Firmware("firmware", R.string.nav_firmware, Icons.Default.Build),
-}
+import java.net.URLDecoder
+import java.net.URLEncoder
 
 /**
- * Top-level shell: four destinations with bottom navigation.
+ * Top-level shell: bottom navigation across the destinations in
+ * [Destination] (Connect, Receive, Send, Keys, Capabilities, Firmware).
  *
  * This is the app-level composition root for both shared resources:
  *
@@ -165,6 +156,10 @@ fun RfLabApp() {
             onCounterObserved = counterTracker::observe,
         ),
     )
+    // Read once here so the catalog/detail screens can show a live
+    // "hardware connected?" fact next to any capability that needs one,
+    // without each screen subscribing to RfLabSession itself.
+    val isConnected by RfLabSession.isConnected.collectAsStateWithLifecycle(initialValue = false)
 
     Scaffold(
         bottomBar = {
@@ -187,7 +182,17 @@ fun RfLabApp() {
                             }
                         },
                         icon = { Icon(destination.icon, contentDescription = label) },
-                        label = { Text(label) },
+                        label = {
+                            // A single bottom-nav item is narrow; without a line
+                            // limit a longer label wraps to two lines and shoves
+                            // the row taller than its neighbours. One line, clip
+                            // with an ellipsis if it still doesn't fit.
+                            Text(
+                                label,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                            )
+                        },
                     )
                 }
             }
@@ -222,6 +227,29 @@ fun RfLabApp() {
                     ),
                 )
             }
+            composable(Destination.Capabilities.route) {
+                ProtocolCatalogScreen(
+                    onOpenFamily = { family ->
+                        navController.navigate(
+                            "capabilities/detail/${URLEncoder.encode(family, "UTF-8")}",
+                        )
+                    },
+                )
+            }
+            composable(
+                route = "capabilities/detail/{family}",
+                arguments = listOf(navArgument("family") { type = NavType.StringType }),
+            ) { entry ->
+                val encoded = entry.arguments?.getString("family").orEmpty()
+                ProtocolDetailScreen(
+                    familyName = URLDecoder.decode(encoded, "UTF-8"),
+                    isConnected = isConnected,
+                    onAction = { action -> navigateForAction(navController, action) },
+                )
+            }
+            composable(STATIC_CODES_ROUTE) {
+                StaticCodesScreen()
+            }
             composable(Destination.Firmware.route) {
                 FirmwareScreen(
                     secretStore = otaSecretStore,
@@ -235,5 +263,25 @@ fun RfLabApp() {
                 )
             }
         }
+    }
+}
+
+/**
+ * Follows a [CapabilityAction] from a protocol-detail button to the real
+ * bottom-nav tab it names, with the same `popUpTo`/`launchSingleTop`/
+ * `restoreState` behavior as tapping that tab directly — a capability
+ * action should feel identical to navigating there yourself, not push a
+ * second, parallel copy of the destination onto the back stack.
+ *
+ * Route resolution itself ([CapabilityAction.route]) is a plain function
+ * with no `NavHostController` dependency and is unit-tested directly; this
+ * function is the thin, untested-by-necessity glue that calls it.
+ */
+private fun navigateForAction(navController: NavHostController, action: CapabilityAction) {
+    val route = action.route() ?: return
+    navController.navigate(route) {
+        popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+        launchSingleTop = true
+        restoreState = true
     }
 }
