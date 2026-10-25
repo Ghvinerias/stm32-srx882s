@@ -309,6 +309,16 @@ private fun ReceivedSignalCard(
                     style = MaterialTheme.typography.bodyMedium,
                     fontFamily = FontFamily.Monospace,
                 )
+                // Only shown when a key is selected that matches this remote
+                // (the decrypt's button nibble equals the clear button).
+                if (row.keyMatches && row.decryptedCounter != null) {
+                    Text(
+                        text = "Counter ${row.decryptedCounter}  (key matches)",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
         }
     }

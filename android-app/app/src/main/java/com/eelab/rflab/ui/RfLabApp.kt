@@ -148,11 +148,21 @@ fun RfLabApp() {
         )
     }
     // Activity-scoped so it outlives tab navigation and decodes continuously.
+    // The selected key as a flow, so received frames are decrypted with
+    // whatever key is active in the keystore.
+    val selectedKeyFlow = remember(keyRepository) {
+        kotlinx.coroutines.flow.combine(
+            keyRepository.keys,
+            keyRepository.selectedId,
+        ) { keys, id -> keys.firstOrNull { it.id == id } }
+    }
     val receiveViewModel: ReceiveViewModel = viewModel(
         factory = ReceiveViewModel.factory(
             transportEvents = RfLabSession.events,
             connected = RfLabSession.isConnected,
             modeSetter = sendEngine::setMode,
+            selectedKey = selectedKeyFlow,
+            onCounterObserved = counterTracker::observe,
         ),
     )
 

@@ -65,7 +65,16 @@ class ReceiveViewModel(
     frameArrivals: Flow<Unit> = emptyFlow(),
     connected: Flow<Boolean> = flowOf(true),
     private val modeSetter: suspend (RadioMode) -> Boolean = { true },
+    selectedKey: Flow<com.eelab.rflab.crypto.KeeLoqKey?> = emptyFlow(),
+    private val onCounterObserved: (serial: Long, counter: Int) -> Unit = { _, _ -> },
 ) : ViewModel() {
+
+    /**
+     * The key currently selected in the keystore, read synchronously when
+     * decorating rows and observing counters. Null when none is selected.
+     */
+    @Volatile
+    private var currentKey: com.eelab.rflab.crypto.KeeLoqKey? = null
 
     private val _uiState = MutableStateFlow(ReceiveUiState())
 
@@ -76,6 +85,22 @@ class ReceiveViewModel(
         viewModelScope.launch {
             signals.collect { signal ->
                 accumulator.accept(signal, clock())
+                // With a matching key selected, record the decrypted counter
+                // so "send next code" can default to last + 1 for this serial.
+                currentKey?.let { key ->
+                    val info = com.eelab.rflab.crypto.KeeLoqHop.decrypt(signal.hopping.toInt(), key.key)
+                    if (info.matchesClearButton(signal.button)) {
+                        onCounterObserved(signal.serial, info.counter)
+                    }
+                }
+                publishRows()
+            }
+        }
+        // Re-decorate rows whenever the selected key changes (switching keys
+        // updates the decrypted counter shown against existing rows).
+        viewModelScope.launch {
+            selectedKey.collect { key ->
+                currentKey = key
                 publishRows()
             }
         }
@@ -187,10 +212,21 @@ class ReceiveViewModel(
         return selected.size
     }
 
+    /** Decorate a row with the decrypted counter when the selected key matches it. */
+    private fun decorate(row: ReceivedSignalRow): ReceivedSignalRow {
+        val key = currentKey ?: return row.copy(decryptedCounter = null, keyMatches = false)
+        val info = com.eelab.rflab.crypto.KeeLoqHop.decrypt(row.hopping.toInt(), key.key)
+        val matches = info.matchesClearButton(row.button)
+        return row.copy(
+            decryptedCounter = if (matches) info.counter else null,
+            keyMatches = matches,
+        )
+    }
+
     private fun publishRows() {
         _uiState.update {
             it.copy(
-                rows = accumulator.rows(),
+                rows = accumulator.rows().map(::decorate),
                 selectedCount = accumulator.selectedCount,
                 // Read the queue directly so the count is correct before the
                 // queue's collector runs.
@@ -217,6 +253,8 @@ class ReceiveViewModel(
             clock: () -> Long = { System.currentTimeMillis() },
             connected: Flow<Boolean> = flowOf(true),
             modeSetter: suspend (RadioMode) -> Boolean = { true },
+            selectedKey: Flow<com.eelab.rflab.crypto.KeeLoqKey?> = emptyFlow(),
+            onCounterObserved: (serial: Long, counter: Int) -> Unit = { _, _ -> },
         ): ReceiveViewModel {
             val decodeErrors = MutableStateFlow(0)
             return ReceiveViewModel(
@@ -226,6 +264,8 @@ class ReceiveViewModel(
                     .map { },
                 connected = connected,
                 modeSetter = modeSetter,
+                selectedKey = selectedKey,
+                onCounterObserved = onCounterObserved,
                 signals = decodeSignals(transportEvents, decodeErrors),
                 sendQueue = sendQueue,
                 clock = clock,
@@ -239,6 +279,8 @@ class ReceiveViewModel(
             sendQueue: SendQueueRepository = SendQueueRepository.shared,
             connected: Flow<Boolean> = flowOf(true),
             modeSetter: suspend (RadioMode) -> Boolean = { true },
+            selectedKey: Flow<com.eelab.rflab.crypto.KeeLoqKey?> = emptyFlow(),
+            onCounterObserved: (serial: Long, counter: Int) -> Unit = { _, _ -> },
         ): ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 create(
@@ -246,6 +288,8 @@ class ReceiveViewModel(
                     sendQueue,
                     connected = connected,
                     modeSetter = modeSetter,
+                    selectedKey = selectedKey,
+                    onCounterObserved = onCounterObserved,
                 )
             }
         }

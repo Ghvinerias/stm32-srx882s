@@ -31,6 +31,15 @@ data class ReceivedSignalRow(
     val repeatCount: Int = 1,
     val selectionOrder: Int? = null,
     val captureTimestampUs: Long = 0L,
+    /**
+     * Sync counter decrypted from [hopping] with the selected key, shown only
+     * when that key matches this remote ([keyMatches]); null when no key is
+     * selected or the key does not match. Display-only: it does not affect
+     * grouping or selection.
+     */
+    val decryptedCounter: Int? = null,
+    /** True when the selected key's decrypt matches this frame's button. */
+    val keyMatches: Boolean = false,
 ) {
     /** Whether the row is checked for "add to send queue". */
     val selected: Boolean get() = selectionOrder != null
