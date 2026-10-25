@@ -1,0 +1,4 @@
+{"type":"status","sequence":732,"flags":0,"timestamp_us":0,"dropped_frames":53,"initial_level":0,"receiver_id":1,"clock_hz":72000000,"total_edges":4107,"dropped_packets":294,"host_time_utc":"2026-10-20T19:37:27.247683+00:00"}
+{"type":"status","sequence":733,"flags":0,"timestamp_us":0,"dropped_frames":54,"initial_level":0,"receiver_id":1,"clock_hz":72000000,"total_edges":4108,"dropped_packets":294,"host_time_utc":"2026-10-20T19:37:28.247830+00:00"}
+{"type":"status","sequence":734,"flags":0,"timestamp_us":0,"dropped_frames":54,"initial_level":0,"receiver_id":1,"clock_hz":72000000,"total_edges":4108,"dropped_packets":294,"host_time_utc":"2026-10-20T19:37:29.248048+00:00"}
+{"type":"status","sequence":735,"flags":0,"timestamp_us":0,"dropped_frames":54,"initial_level":0,"receiver_id":1,"clock_hz":72000000,"total_edges":4108,"dropped_packets":294,"host_time_utc":"2026-10-20T19:37:30.246987+00:00"}

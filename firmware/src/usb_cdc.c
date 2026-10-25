@@ -6,7 +6,11 @@
 #include "usbd_desc.h"
 
 #define USB_RX_SIZE 256U
-#define USB_TX_SIZE 512U
+// Must comfortably exceed the largest encoded transport packet
+// (HW_CAPTURE_MAX_PULSES=256 -> ~536 bytes encoded) now that USB CDC can
+// carry the binary capture stream as an alternative to UART (see
+// transport_select_usb_output in transport.c).
+#define USB_TX_SIZE 1024U
 #define USB_RX_MASK (USB_RX_SIZE - 1U)
 #define USB_TX_MASK (USB_TX_SIZE - 1U)
 
