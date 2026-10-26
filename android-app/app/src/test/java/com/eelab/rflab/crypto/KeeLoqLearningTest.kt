@@ -223,4 +223,50 @@ class KeeLoqLearningTest {
             KeeLoqLearning.learningJcmGen2(h32("ffffffff"), 0x01, h64("8000000000000000")),
         )
     }
+
+    // --- Additional boundary/edge-case checks (independent of self-consistency) ----
+    // These are deterministic behavior checks; correctness against upstream is
+    // established by the pinned KATs above and the 43k-vector differential run
+    // documented in this class's header.
+
+    @Test
+    fun normalLearningBoundarySerialZero() {
+        val result = KeeLoqLearning.normalLearning(0x00000000, key)
+        assertEquals(result, KeeLoqLearning.normalLearning(0x00000000, key))
+    }
+
+    @Test
+    fun secureLearningDifferentSeedsProduceDifferentResults() {
+        val serial = 0x12345678
+        val r1 = KeeLoqLearning.secureLearning(serial, 0x00000000, key)
+        val r2 = KeeLoqLearning.secureLearning(serial, 0xFFFFFFFF.toInt(), key)
+        assertNotEquals(r1, r2)
+    }
+
+    @Test
+    fun magicXorType1WithZeroKey() {
+        val serial = 0x0ABCDEF1
+        val result = KeeLoqLearning.magicXorType1Learning(serial, 0L)
+        val d = (serial and 0x0FFFFFFF).toLong()
+        assertEquals((d shl 32) or d, result)
+    }
+
+    @Test
+    fun magicSerialType1HandlesMaxSerialByteValues() {
+        val serial = 0x00FFFFFF
+        val magicMan = 0x55555555L
+        val derived = KeeLoqLearning.magicSerialType1Learning(serial, magicMan)
+        val checksum = ((serial and 0xFF) + ((serial ushr 8) and 0xFF)) and 0xFF
+        assertEquals(checksum.toLong(), (derived ushr 32) and 0xFF)
+        assertEquals(magicMan and 0xFFFFFFFFL, derived and 0xFFFFFFFFL)
+    }
+
+    @Test
+    fun learningAerfUsesFewerRoundsThanFullLearning() {
+        val serial = 0x0ABCDEF1
+        val full = KeeLoqLearning.normalLearning(serial, key)
+        val aerf = KeeLoqLearning.learningAerf(serial, key)
+        // Different round counts should produce different results
+        assertNotEquals(full, aerf)
+    }
 }

@@ -42,4 +42,40 @@ class KeeLoqCipherTest {
         assertEquals(0xA6AC0EA2.toInt(), KeeLoqCipher.encrypt(0x0CA69B92, key))
         assertEquals(0x0CA69B92, KeeLoqCipher.decrypt(0xA6AC0EA2.toInt(), key))
     }
+
+    @Test
+    fun boundaryValuesEncryptDecrypt() {
+        val key = 0x123456789ABCDEF0L
+        // All zeros
+        assertEquals(0, KeeLoqCipher.decrypt(KeeLoqCipher.encrypt(0, key), key))
+        // All ones (as signed int)
+        val allOnes = -1
+        assertEquals(allOnes, KeeLoqCipher.decrypt(KeeLoqCipher.encrypt(allOnes, key), key))
+        // Max positive
+        assertEquals(0x7FFFFFFF, KeeLoqCipher.decrypt(KeeLoqCipher.encrypt(0x7FFFFFFF, key), key))
+        // Min negative
+        assertEquals(0x80000000.toInt(), KeeLoqCipher.decrypt(KeeLoqCipher.encrypt(0x80000000.toInt(), key), key))
+    }
+
+    @Test
+    fun decryptRoundsZeroRoundsReturnsDataUnchanged() {
+        val key = 0x5CEC6701B79FD949L
+        val data = 0x12345678
+        // decryptRounds with 0 rounds should not transform the data
+        assertEquals(data, KeeLoqCipher.decryptRounds(data, key, 0))
+    }
+
+    @Test
+    fun decryptRoundsPartialRoundsBehavior() {
+        val key = 0x5CEC6701B79FD949L
+        val data = 0xF741E2DB.toInt()
+        // AERF uses 64 rounds; just verify it's deterministic and different from 0/full in general
+        val r64 = KeeLoqCipher.decryptRounds(data, key, 64)
+        val r0 = KeeLoqCipher.decryptRounds(data, key, 0)
+        val r528 = KeeLoqCipher.decrypt(data, key)
+        assertEquals(data, r0)
+        assertEquals(r64, KeeLoqCipher.decryptRounds(data, key, 64))
+        // Different round counts should generally produce different results
+        assertEquals(false, r64 == r528)
+    }
 }
